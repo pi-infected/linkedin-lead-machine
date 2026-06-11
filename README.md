@@ -1,6 +1,8 @@
 # linkedin-leadgen — Claude plugin
 
 <p align="center">
+  <img src="assets/pixel-title.png" width="480" alt="LinkedIn Lead Machine in pixel art letters"/>
+  <br/>
   <img src="assets/pixel-art.png" width="480" alt="Pixel art: a magnet pulling in LinkedIn leads"/>
 </p>
 
