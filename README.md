@@ -1,5 +1,9 @@
 # linkedin-leadgen — Claude plugin
 
+<p align="center">
+  <img src="assets/pixel-art.png" width="480" alt="Pixel art: a magnet pulling in LinkedIn leads"/>
+</p>
+
 Agent-driven LinkedIn lead generation. You describe **who** you want to reach; the agent
 searches LinkedIn (people / posts / comments), scores and classifies the results against an
 ICP it builds with you, and exports CSVs. A real browser does the requests, the tool paces
