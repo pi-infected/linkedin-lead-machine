@@ -1,0 +1,26 @@
+{
+  "_help": "Copie en config/settings.json pour surcharger. Valeurs en millisecondes. Ces timings sont CONSERVATEURS et appliqués par l'outil lui-même, pas par l'agent. Augmente-les si LinkedIn devient nerveux. Ne les descends PAS sans raison.",
+
+  "minIntervalMs": {
+    "global": 4000,
+    "search": 9000,
+    "comments": 3000,
+    "profile": 14000
+  },
+  "jitterMs": 5000,
+
+  "dailyCaps": {
+    "voyager": 300,
+    "profile": 50,
+    "searchPeople": 100
+  },
+
+  "retry": {
+    "maxRetries": 5,
+    "baseDelayMs": 1000,
+    "maxDelayMs": 30000,
+    "backoffFactor": 2
+  },
+
+  "defaultServerCooldownMs": 90000
+}

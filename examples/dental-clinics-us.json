@@ -1,0 +1,23 @@
+{
+  "icp": "Decision-makers at independent dental & dermatology clinics in the US — prospects for a patient-scheduling SaaS. Demonstrates fully custom scoring + classification on a non-tech domain.",
+  "keywords": [
+    "dental practice owner",
+    "dermatology clinic owner",
+    "founder dental group",
+    "practice manager dental",
+    "office manager dental clinic",
+    "DSO operations"
+  ],
+  "geoUrn": "103644278",
+  "geoLabel": "United States",
+  "minScore": 1,
+  "scoreRules": [
+    { "tag": "owner", "weight": 4, "patterns": ["owner", "founder", "principal dentist", "practice owner"] },
+    { "tag": "ops", "weight": 3, "patterns": ["practice manager", "office manager", "operations", "\\bDSO\\b"] },
+    { "tag": "multi-site", "weight": 2, "patterns": ["group", "multi-?site", "\\d+ locations"] }
+  ],
+  "groups": [
+    { "name": "owner_clinician", "patterns": ["owner", "founder", "principal", "\\bDDS\\b", "\\bDMD\\b", "dentist", "dermatologist"] },
+    { "name": "practice_ops", "patterns": ["practice manager", "office manager", "operations", "administrator", "\\bDSO\\b"] }
+  ]
+}

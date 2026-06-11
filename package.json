@@ -1,0 +1,25 @@
+{
+  "name": "linkedin-leadgen",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Generic LinkedIn lead-gen engine — agent-driven ICP, browser transport, self-pacing rate limits, results to files. Ships as a Claude plugin.",
+  "bin": {
+    "lk": "./src/cli.ts"
+  },
+  "scripts": {
+    "lk": "tsx src/cli.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "patchright": "^1.49.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "@types/node": "^22.10.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

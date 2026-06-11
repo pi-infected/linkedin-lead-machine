@@ -1,0 +1,25 @@
+# Dépendances / build
+node_modules/
+dist/
+
+# SECRETS — ne JAMAIS committer (jetons de session LinkedIn)
+cookies
+cookies.*
+*.cookies
+config/cookies.json
+config/settings.json
+
+# État runtime (session navigateur, rate limiter, profil actif)
+state/
+
+# Données collectées (personnes scrapées = données perso, réponses brutes, CSV)
+data/
+
+# Campagnes spécifiques à l'utilisateur (runtime ; voir examples/ pour des modèles)
+campaigns/
+
+# Logs
+*.log
+
+# Scaffold outillage
+.tokenade/
