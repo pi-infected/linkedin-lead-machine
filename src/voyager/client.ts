@@ -39,7 +39,7 @@ function saveRaw(label: string, body: unknown): string {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const safe = label.replace(/[^a-z0-9_-]+/gi, '_').slice(0, 60);
   const file = resolve(RAW_DIR, `${stamp}_${String(rawCounter).padStart(3, '0')}_${safe}.json`);
-  writeFileSync(file, typeof body === 'string' ? body : JSON.stringify(body, null, 2));
+  writeFileSync(file, typeof body === 'string' ? body : JSON.stringify(body, null, 2), 'utf8');
   return file;
 }
 
@@ -58,15 +58,23 @@ export interface VoyagerResult<T = any> {
   status: number;
 }
 
-export async function voyagerGet<T = any>(url: string, opts: VoyagerGetOptions): Promise<VoyagerResult<T>> {
+export interface VoyagerRequestOptions extends VoyagerGetOptions {
+  method?: 'GET' | 'POST';
+  body?: unknown; // objet -> JSON.stringify ; string -> tel quel ; POST uniquement
+}
+
+async function voyagerRequest<T = any>(url: string, opts: VoyagerRequestOptions): Promise<VoyagerResult<T>> {
   const settings = getSettings();
   const { context, kind, label } = opts;
+  const method = opts.method ?? 'GET';
   const verbose = opts.verbose ?? true;
   const log = (m: string) => verbose && process.stderr.write(`[voyager] ${m}\n`);
 
   if (!(await isLoggedIn())) throw new NotLoggedInError();
 
   const appHeaders = buildAppHeaders(context);
+  const bodyStr =
+    opts.body == null ? undefined : typeof opts.body === 'string' ? opts.body : JSON.stringify(opts.body);
 
   let attempt = 0;
   for (;;) {
@@ -77,7 +85,7 @@ export async function voyagerGet<T = any>(url: string, opts: VoyagerGetOptions):
 
     let res: { status: number; ok: boolean; retryAfter: string | null; body: string };
     try {
-      res = await voyagerFetchInPage(url, appHeaders);
+      res = await voyagerFetchInPage(url, appHeaders, { method, body: bodyStr });
     } catch (e: any) {
       if (attempt <= settings.retry.maxRetries) {
         const delay = backoff(attempt, settings);
@@ -97,7 +105,7 @@ export async function voyagerGet<T = any>(url: string, opts: VoyagerGetOptions):
       }
       const rawFile = (opts.saveRawResponse ?? true) ? saveRaw(label, json) : undefined;
       recordSuccess(kind);
-      log(`200 OK  ${label}  (raw: ${rawFile ? rawFile.split('/').pop() : 'non sauvé'})`);
+      log(`${res.status} OK  ${method} ${label}  (raw: ${rawFile ? rawFile.split('/').pop() : 'non sauvé'})`);
       return { data: json as T, rawFile, status: res.status };
     }
 
@@ -125,10 +133,19 @@ export async function voyagerGet<T = any>(url: string, opts: VoyagerGetOptions):
       continue;
     }
 
-    const err: any = new Error(`Voyager HTTP ${status} sur ${label}: ${bodyText.slice(0, 300)}`);
+    const err: any = new Error(`Voyager HTTP ${status} sur ${method} ${label}: ${bodyText.slice(0, 300)}`);
     err.status = status;
     throw err;
   }
+}
+
+export async function voyagerGet<T = any>(url: string, opts: VoyagerGetOptions): Promise<VoyagerResult<T>> {
+  return voyagerRequest<T>(url, { ...opts, method: 'GET' });
+}
+
+/** POST Voyager (invitations, actions). Même rate-limit / backoff / cooldown que le GET. */
+export async function voyagerPost<T = any>(url: string, opts: VoyagerRequestOptions): Promise<VoyagerResult<T>> {
+  return voyagerRequest<T>(url, { ...opts, method: 'POST' });
 }
 
 function backoff(attempt: number, settings: ReturnType<typeof getSettings>): number {

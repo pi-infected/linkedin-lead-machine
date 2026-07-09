@@ -15,7 +15,9 @@ export type VoyagerContext =
   | 'profile'
   | 'comments'
   | 'post_comments'
-  | 'feed';
+  | 'feed'
+  | 'connections'
+  | 'invite';
 
 function randHex(n: number): string {
   const chars = '0123456789abcdef';
@@ -70,6 +72,14 @@ export function buildAppHeaders(context: VoyagerContext): Record<string, string>
       pageInstance = `urn:li:page:d_flagship3_feed;${pageInstanceHash()}`;
       pemMetadata = 'Voyager - Feed - Subsequent=subsequent-feed-updates';
       break;
+    case 'connections':
+      pageInstance = `urn:li:page:d_flagship3_people_connections;${pageInstanceHash()}`;
+      pemMetadata = 'Voyager - My Network - Connections=connections';
+      break;
+    case 'invite':
+      pageInstance = `urn:li:page:d_flagship3_profile_view_base;${pageInstanceHash()}`;
+      pemMetadata = 'Voyager - Profile Actions=topcard-primary-connect-action-click,Voyager - Invitations - Actions=invite-send';
+      break;
     case 'profile':
     case 'people':
     default:
@@ -91,7 +101,7 @@ export function buildAppHeaders(context: VoyagerContext): Record<string, string>
     'x-restli-protocol-version': '2.0.0',
   };
 
-  if (context === 'profile') headers['x-li-deco-include-micro-schema'] = 'true';
+  if (context === 'profile' || context === 'invite') headers['x-li-deco-include-micro-schema'] = 'true';
 
   return headers;
 }

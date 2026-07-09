@@ -26,24 +26,67 @@ const PROFILE_DIR = resolve(STATE_DIR, 'browser-profile');
 let _ctx: BrowserContext | null = null;
 let _page: Page | null = null;
 
+/**
+ * Chemins d'installation standard de Chrome/Edge par OS (fallback si le canal
+ * `chrome` de Playwright échoue à le localiser). Surcharge manuelle : LK_CHROME_PATH.
+ */
+function findChrome(): string | undefined {
+  const override = process.env.LK_CHROME_PATH;
+  if (override && existsSync(override)) return override;
+  const PF = process.env['PROGRAMFILES'] || 'C:\\Program Files';
+  const PFx86 = process.env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)';
+  const LAD = process.env['LOCALAPPDATA'] || '';
+  const cands =
+    process.platform === 'win32'
+      ? [
+          `${PF}\\Google\\Chrome\\Application\\chrome.exe`,
+          `${PFx86}\\Google\\Chrome\\Application\\chrome.exe`,
+          `${LAD}\\Google\\Chrome\\Application\\chrome.exe`,
+          `${PF}\\Microsoft\\Edge\\Application\\msedge.exe`,
+        ]
+      : process.platform === 'darwin'
+        ? [
+            '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+            '/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary',
+            '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+          ]
+        : [
+            '/usr/bin/google-chrome',
+            '/usr/bin/google-chrome-stable',
+            '/opt/google/chrome/chrome',
+            '/usr/bin/chromium',
+            '/usr/bin/chromium-browser',
+            '/snap/bin/chromium',
+          ];
+  return cands.find((c) => c && existsSync(c));
+}
+
 async function launch(_opts: { headful?: boolean } = {}): Promise<BrowserContext> {
   if (_ctx) return _ctx;
   if (!existsSync(PROFILE_DIR)) mkdirSync(PROFILE_DIR, { recursive: true });
-  const channel = process.env.LK_BROWSER_CHANNEL || 'chrome'; // vrai Chrome système si dispo (stealth max)
-  try {
-    _ctx = await chromium.launchPersistentContext(PROFILE_DIR, {
-      headless: false, // headful sous xvfb
-      channel,
-      viewport: { width: 1440, height: 900 },
-    });
-  } catch (e) {
-    // Fallback : chromium bundlé patchright si le canal "chrome" n'est pas installé.
-    _ctx = await chromium.launchPersistentContext(PROFILE_DIR, {
-      headless: false,
-      viewport: { width: 1440, height: 900 },
-    });
+  // headful sur TOUS les OS (requis par Cloudflare Turnstile) : Linux via xvfb
+  // (voir bin/lk.mjs), macOS/Windows via la session bureau.
+  const base = { headless: false as const, viewport: { width: 1440, height: 900 } };
+  // Ordre de tentative : 1) canal chrome système (stealth max) ; 2) chemin OS
+  // détecté ; 3) chromium bundlé par patchright.
+  const channel = process.env.LK_BROWSER_CHANNEL || 'chrome';
+  const attempts: Array<Record<string, unknown>> = [{ ...base, channel }];
+  const exe = findChrome();
+  if (exe) attempts.push({ ...base, executablePath: exe });
+  attempts.push({ ...base });
+  let lastErr: unknown;
+  for (const opts of attempts) {
+    try {
+      _ctx = await chromium.launchPersistentContext(PROFILE_DIR, opts as any);
+      return _ctx;
+    } catch (e) {
+      lastErr = e;
+    }
   }
-  return _ctx;
+  throw new Error(
+    `Impossible de lancer un navigateur (Chrome/Chromium introuvable). ` +
+      `Installe Google Chrome, ou définis LK_CHROME_PATH vers l'exécutable. Détail: ${(lastErr as any)?.message || lastErr}`,
+  );
 }
 
 async function getPage(opts: { headful?: boolean } = {}): Promise<Page> {
@@ -75,23 +118,39 @@ export interface InPageResponse {
   body: string;
 }
 
+export interface InPageFetchOpts {
+  method?: string; // défaut GET
+  body?: string; // corps JSON déjà sérialisé (POST)
+}
+
 /**
- * Exécute un GET Voyager DANS la page linkedin.com. Le navigateur ajoute
- * automatiquement cookie / user-agent / sec-* / referer ; on n'injecte que les
- * en-têtes applicatifs (x-li-*, accept, csrf-token lu depuis le cookie JSESSIONID).
+ * Exécute un fetch Voyager (GET ou POST) DANS la page linkedin.com. Le navigateur
+ * ajoute automatiquement cookie / user-agent / sec-* / referer ; on n'injecte que
+ * les en-têtes applicatifs (x-li-*, accept, csrf-token lu depuis le cookie
+ * JSESSIONID). Pour un POST, on pose content-type: application/json + le corps.
  */
-export async function voyagerFetchInPage(url: string, appHeaders: Record<string, string>): Promise<InPageResponse> {
+export async function voyagerFetchInPage(
+  url: string,
+  appHeaders: Record<string, string>,
+  opts: InPageFetchOpts = {},
+): Promise<InPageResponse> {
   const page = await getPage();
   await ensureOnLinkedIn(page);
 
   return page.evaluate(
-    async ([u, hdrs]: [string, Record<string, string>]) => {
+    async ([u, hdrs, o]: [string, Record<string, string>, InPageFetchOpts]) => {
       // csrf-token = valeur du cookie JSESSIONID (sans guillemets)
       const m = document.cookie.match(/JSESSIONID=("?)(ajax:[^";]+)\1/);
       const csrf = m ? m[2] : '';
       const headers: Record<string, string> = { ...hdrs };
       if (csrf) headers['csrf-token'] = csrf;
-      const res = await fetch(u, { method: 'GET', headers, credentials: 'include' });
+      const method = (o && o.method) || 'GET';
+      const init: RequestInit = { method, headers, credentials: 'include' };
+      if (o && o.body != null && method !== 'GET') {
+        headers['content-type'] = 'application/json; charset=UTF-8';
+        init.body = o.body;
+      }
+      const res = await fetch(u, init);
       const body = await res.text();
       return {
         status: res.status,
@@ -100,7 +159,7 @@ export async function voyagerFetchInPage(url: string, appHeaders: Record<string,
         body,
       };
     },
-    [url, appHeaders] as [string, Record<string, string>],
+    [url, appHeaders, opts] as [string, Record<string, string>, InPageFetchOpts],
   );
 }
 

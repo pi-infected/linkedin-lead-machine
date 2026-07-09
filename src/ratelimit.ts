@@ -17,12 +17,14 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from '
 import { resolve } from 'node:path';
 import { STATE_DIR, getSettings } from './config.js';
 
-export type CallKind = 'search' | 'comments' | 'profile';
+export type CallKind = 'search' | 'comments' | 'profile' | 'invite' | 'connections';
+
+type DailyBucket = 'voyager' | 'profile' | 'searchPeople' | 'invite' | 'connections';
 
 interface State {
   lastCallAt: Record<string, number>; // 'global' | kind -> epoch ms
   cooldownUntil: number; // epoch ms ; appels bloqués jusque-là (signal serveur)
-  daily: { date: string; voyager: number; profile: number; searchPeople: number };
+  daily: { date: string; voyager: number; profile: number; searchPeople: number; invite: number; connections: number };
 }
 
 const STATE_PATH = resolve(STATE_DIR, 'ratelimit.json');
@@ -40,7 +42,7 @@ function emptyState(): State {
   return {
     lastCallAt: {},
     cooldownUntil: 0,
-    daily: { date: todayStr(), voyager: 0, profile: 0, searchPeople: 0 },
+    daily: { date: todayStr(), voyager: 0, profile: 0, searchPeople: 0, invite: 0, connections: 0 },
   };
 }
 
@@ -50,7 +52,7 @@ function loadState(): State {
     const s = JSON.parse(readFileSync(STATE_PATH, 'utf8')) as State;
     // Reset quotidien
     if (s.daily?.date !== todayStr()) {
-      s.daily = { date: todayStr(), voyager: 0, profile: 0, searchPeople: 0 };
+      s.daily = { date: todayStr(), voyager: 0, profile: 0, searchPeople: 0, invite: 0, connections: 0 };
     }
     s.lastCallAt ||= {};
     s.cooldownUntil ||= 0;
@@ -63,7 +65,7 @@ function loadState(): State {
 function saveState(s: State): void {
   if (!existsSync(STATE_DIR)) mkdirSync(STATE_DIR, { recursive: true });
   const tmp = STATE_PATH + '.tmp';
-  writeFileSync(tmp, JSON.stringify(s, null, 2));
+  writeFileSync(tmp, JSON.stringify(s, null, 2), 'utf8');
   renameSync(tmp, STATE_PATH); // écriture atomique
 }
 
@@ -79,8 +81,10 @@ export class DailyCapReached extends Error {
 }
 
 /** Comptage quotidien que consomme chaque type d'appel. */
-function bucketsFor(kind: CallKind): Array<'voyager' | 'profile' | 'searchPeople'> {
+function bucketsFor(kind: CallKind): DailyBucket[] {
   if (kind === 'profile') return ['voyager', 'profile'];
+  if (kind === 'invite') return ['invite']; // les invitations (POST) ont leur propre plafond, hors quota de lecture
+  if (kind === 'connections') return ['voyager', 'connections'];
   return ['voyager']; // search + comments comptent dans le quota voyager global
 }
 
@@ -131,7 +135,8 @@ export async function acquire(kind: CallKind, opts: { verbose?: boolean } = {}):
     const dueGlobal = lastGlobal + minGlobal;
     const dueKind = lastKind + minKind;
     const due = Math.max(dueGlobal, dueKind);
-    const jitter = Math.random() * settings.jitterMs;
+    const jitterBudget = settings.jitterMsByKind?.[kind] ?? settings.jitterMs;
+    const jitter = Math.random() * jitterBudget;
 
     if (now < due) {
       const wait = due - now + jitter;

@@ -119,7 +119,7 @@ export function saveProfile(patch: Partial<Profile>, opts: { mergeKeywords?: boo
     : cur.keywords;
   const next = normalize({ ...cur, ...patch, keywords });
   if (!existsSync(STATE_DIR)) mkdirSync(STATE_DIR, { recursive: true });
-  writeFileSync(PROFILE_PATH, JSON.stringify(next, null, 2) + '\n');
+  writeFileSync(PROFILE_PATH, JSON.stringify(next, null, 2) + '\n', 'utf8');
   _cache = next;
   return next;
 }
@@ -127,7 +127,7 @@ export function saveProfile(patch: Partial<Profile>, opts: { mergeKeywords?: boo
 /** Réinitialise le profil actif (cible vierge). */
 export function resetProfile(): Profile {
   _cache = null;
-  if (existsSync(STATE_DIR)) writeFileSync(PROFILE_PATH, JSON.stringify(normalize({}), null, 2) + '\n');
+  if (existsSync(STATE_DIR)) writeFileSync(PROFILE_PATH, JSON.stringify(normalize({}), null, 2) + '\n', 'utf8');
   return getProfile();
 }
 

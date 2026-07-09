@@ -21,17 +21,21 @@ export interface CookieConfig {
 }
 
 export interface Settings {
-  minIntervalMs: { global: number; search: number; comments: number; profile: number };
+  minIntervalMs: { global: number; search: number; comments: number; profile: number; invite: number; connections: number };
   jitterMs: number;
-  dailyCaps: { voyager: number; profile: number; searchPeople: number };
+  // Jitter spécifique par type d'appel (surcharge jitterMs). Sert surtout aux invitations,
+  // où l'on veut un espacement humain de 60-120s (minInterval 60s + jitter jusqu'à 60s).
+  jitterMsByKind?: Partial<Record<'search' | 'comments' | 'profile' | 'invite' | 'connections', number>>;
+  dailyCaps: { voyager: number; profile: number; searchPeople: number; invite: number; connections: number };
   retry: { maxRetries: number; baseDelayMs: number; maxDelayMs: number; backoffFactor: number };
   defaultServerCooldownMs: number;
 }
 
 const DEFAULT_SETTINGS: Settings = {
-  minIntervalMs: { global: 4000, search: 9000, comments: 3000, profile: 14000 },
+  minIntervalMs: { global: 4000, search: 9000, comments: 3000, profile: 14000, invite: 60000, connections: 9000 },
   jitterMs: 5000,
-  dailyCaps: { voyager: 300, profile: 50, searchPeople: 100 },
+  jitterMsByKind: { invite: 60000 },
+  dailyCaps: { voyager: 300, profile: 50, searchPeople: 100, invite: 20, connections: 100 },
   retry: { maxRetries: 5, baseDelayMs: 1000, maxDelayMs: 30000, backoffFactor: 2 },
   defaultServerCooldownMs: 90000,
 };

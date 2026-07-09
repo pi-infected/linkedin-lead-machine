@@ -53,9 +53,28 @@ Or just ask in natural language — the **linkedin-leadgen** skill and subagent 
 ## Transport
 
 Requests go through a **real Chrome driven by patchright** (a stealth Playwright fork),
-headful via **xvfb** — a genuine browser fingerprint. The Voyager `fetch()` calls run
-*inside* the linkedin.com page (`page.evaluate`); no DOM scraping. The `bin/lk` wrapper adds
-`xvfb-run -a` automatically for network commands.
+**headful** on every OS (Cloudflare Turnstile requires it) — a genuine browser fingerprint.
+The Voyager `fetch()` calls run *inside* the linkedin.com page (`page.evaluate`); no DOM
+scraping.
+
+## Platform support
+
+The cross-platform launcher `bin/lk.mjs` (used by the `lk` command and the `bin/lk` shim)
+picks how to supply the display headful Chrome needs:
+
+| OS | How it runs | Requirements |
+|---|---|---|
+| **Linux** | network commands wrapped in `xvfb-run -a` automatically | `xvfb` installed (`sudo apt-get install -y xvfb`); on a Linux desktop with a screen, set `LK_NO_XVFB=1` to run directly |
+| **macOS** | direct, uses the desktop session | Google Chrome installed (Voyager runs in a real window) |
+| **Windows** | direct, uses the desktop session | Google Chrome at a standard path (auto-detected), or set `LK_CHROME_PATH` |
+
+Chrome is located via Playwright's `chrome` channel, then standard per-OS install paths,
+then patchright's bundled Chromium. Override with `LK_CHROME_PATH=<exe>` or
+`LK_BROWSER_CHANNEL=<channel>`. All file I/O is explicit UTF-8. macOS/Windows open a visible
+browser window during network commands — that is expected.
+
+Invoke on any OS with `npx lk <cmd>` (after `npm install`), `npm run lk -- <cmd>`, or
+`node bin/lk.mjs <cmd>`. On Linux/macOS the `./bin/lk <cmd>` shim also works.
 
 ## Quick start (CLI directly)
 
@@ -86,6 +105,8 @@ npx patchright install chrome
 | `comments <postUrn>` | commenters of a post |
 | `campaign [--mode people\|posts] [--keywords …] [--geo …] [--pages N] [--comments]` | multi-keyword run, one browser, paced |
 | `resolve <urn>` / `resolve-pending` | temporary URN → vanity URL (sparing) |
+| `invite [<url\|urn>…] [--target N] [--group X] [--dry-run]` | send connection requests (no note, paced 60-120s, ~20/day cap); args = specific profiles, else the invitable pool |
+| `check-accepted [<url\|urn>…] [--limit N]` | who accepted — reliable per-URN relationship check: `connected` / `pending` / `none`; marks accepted leads |
 | `rescore` | recompute scores/tags after an ICP change |
 | `leads [--min-score N --group X]` | peek at top leads |
 | `export [--min-score N --no-split]` | write CSVs (combined + per group) |
@@ -97,7 +118,7 @@ npx patchright install chrome
 commands/         slash commands
 agents/           linkedin-leadgen subagent
 skills/           linkedin-leadgen SKILL.md (the agent's playbook)
-bin/lk            single entry point (xvfb auto for network)
+bin/lk.mjs        cross-platform launcher (Linux xvfb / macOS·Windows direct); bin/lk = POSIX shim
 src/              the engine (voyager transport, ratelimit, store, profile, score, classify, cli)
 data/             leads + raw responses (gitignored)
 state/            ratelimit.json + profile.json + browser profile (gitignored)

@@ -5,14 +5,20 @@
     "global": 4000,
     "search": 9000,
     "comments": 3000,
-    "profile": 14000
+    "profile": 14000,
+    "invite": 60000,
+    "connections": 9000
   },
   "jitterMs": 5000,
+  "_jitterMsByKind": "Jitter par type (surcharge jitterMs). invite: 60000 -> espacement 60-120s entre demandes de connexion.",
+  "jitterMsByKind": { "invite": 60000 },
 
   "dailyCaps": {
     "voyager": 300,
     "profile": 50,
-    "searchPeople": 100
+    "searchPeople": 100,
+    "invite": 20,
+    "connections": 100
   },
 
   "retry": {

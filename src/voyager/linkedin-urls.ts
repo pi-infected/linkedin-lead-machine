@@ -180,7 +180,7 @@ export function extractLinkedInSlug(urlOrSlug: string): string {
       return input;
     }
 
-    if (input.startsWith('http://') || input.startsWith('https://')) {
+    if (/^https?:\/\//i.test(input)) {
       const normalizedUrl = normalizeLinkedInProfileUrl(input);
       if (!normalizedUrl) {
         return '';

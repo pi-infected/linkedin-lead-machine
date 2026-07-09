@@ -1,11 +1,5 @@
 #!/usr/bin/env sh
-# Point d'entrée unique du moteur LinkedIn lead-gen.
-# Les commandes RÉSEAU sont lancées sous xvfb (navigateur headful sans écran) ;
-# les commandes hors-ligne (profile/geo/leads/export/rescore/status) tournent direct.
-set -eu
-ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
-NET=" seed-cookies login whoami search-posts search-people comments campaign resolve resolve-pending "
-case "$NET" in
-  *" ${1:-help} "*) exec xvfb-run -a npx tsx "$ROOT/src/cli.ts" "$@" ;;
-  *)                exec npx tsx "$ROOT/src/cli.ts" "$@" ;;
-esac
+# Shim POSIX (Linux/macOS) : délègue au lanceur Node cross-platform bin/lk.mjs.
+# Sur Windows, utilise la commande `lk` installée par npm, ou `node bin\lk.mjs`.
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+exec node "$ROOT/lk.mjs" "$@"

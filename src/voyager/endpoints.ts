@@ -2,9 +2,9 @@
  * Endpoints Voyager utilisés pour le lead-gen.
  * queryIds repris tels quels de l'app existante (lea-desktop-app) — observés janv. 2026.
  */
-import { voyagerGet } from './client.js';
-import { parsePostSearch, parsePeopleSearch, parseComments, parseProfileSlug, Person, PostRecord, CommentRecord } from './parse.js';
-import { normalizePostUrnForVoyager, extractLinkedInSlug } from './linkedin-urls.js';
+import { voyagerGet, voyagerPost, DailyCapReached } from './client.js';
+import { parsePostSearch, parsePeopleSearch, parseComments, parseProfileSlug, parseMemberRelationship, RelationshipStatus, Person, PostRecord, CommentRecord } from './parse.js';
+import { normalizePostUrnForVoyager, extractLinkedInSlug, normalizeProfileUrnForMention } from './linkedin-urls.js';
 
 const BASE = 'https://www.linkedin.com';
 
@@ -12,6 +12,7 @@ const QID_CLUSTERS_CONTENT = 'voyagerSearchDashClusters.ef3d0937fb65bd7812e32e5a
 const QID_CLUSTERS_PEOPLE = 'voyagerSearchDashClusters.b0928897b71bd00a5a7291755dcd64f0';
 const QID_COMMENTS = 'voyagerSocialDashComments.afec6d88d7810d45548797a8dac4fb87';
 const PROFILE_DECORATION_ID = 'com.linkedin.voyager.dash.deco.identity.profile.FullProfile-76';
+const INVITE_DECORATION_ID = 'com.linkedin.voyager.dash.deco.relationships.InvitationCreationResultWithInvitee-2';
 
 export type DateFilter = 'past-24h' | 'past-week' | 'past-month' | null;
 
@@ -181,4 +182,60 @@ export async function resolveProfileUrl(urnOrId: string): Promise<{ profileUrl?:
   const res = await voyagerGet(url, { context: 'profile', kind: 'profile', label: `profile_${urn.split(':').pop()}` });
   const parsed = parseProfileSlug(res.data);
   return { ...parsed, rawFile: res.rawFile };
+}
+
+export interface MemberRelationship {
+  status: RelationshipStatus;
+  distance?: number; // 1/2/3, 0 = hors réseau
+  rawFile?: string;
+}
+
+/**
+ * État de la relation avec un membre, via l'entité memberRelationship (dash).
+ * FIABLE et par URN (indépendant du nom, contrairement à une recherche) :
+ *   'connected' = a accepté (1er degré) · 'pending' = invitation en attente ·
+ *   'none' = aucune relation/invitation active. kind='connections' (cap dédié).
+ */
+export async function getMemberRelationship(profileUrnOrId: string): Promise<MemberRelationship> {
+  const id = profileUrnOrId.match(/ACoAA[A-Za-z0-9_-]+/)?.[0] || profileUrnOrId.split(':').pop() || profileUrnOrId;
+  const relUrn = `urn:li:fsd_memberRelationship:${id}`;
+  const url = `${BASE}/voyager/api/voyagerRelationshipsDashMemberRelationships/${encodeURIComponent(relUrn)}`;
+  const res = await voyagerGet(url, { context: 'connections', kind: 'connections', label: `rel_${id}` });
+  return { ...parseMemberRelationship(res.data), rawFile: res.rawFile };
+}
+
+/* ==================== Réseau : invitations ==================== */
+
+export interface InviteResult {
+  ok: boolean;
+  status: number;
+  rawFile?: string;
+  error?: string;
+}
+
+/**
+ * Envoie une demande de connexion (invitation) via l'API Voyager (même endpoint
+ * que le bouton "Se connecter" du site). Sans note par défaut. Nécessite l'URN
+ * fsd_profile du destinataire. kind='invite' -> espacement 60-120s + plafond
+ * quotidien (défaut 20/j) appliqués par l'outil.
+ *
+ * Relance DailyCapReached (pour que la boucle appelante s'arrête proprement) ;
+ * toute autre erreur est renvoyée dans le résultat (ok:false) pour ne pas
+ * interrompre le lot sur un seul profil (ex: déjà invité, hors réseau).
+ */
+export async function sendInvitation(profileUrnOrId: string, opts: { message?: string } = {}): Promise<InviteResult> {
+  const urn = normalizeProfileUrnForMention(profileUrnOrId); // -> urn:li:fsd_profile:ID
+  const url =
+    `${BASE}/voyager/api/voyagerRelationshipsDashMemberRelationships?action=verifyQuotaAndCreateV2` +
+    `&decorationId=${INVITE_DECORATION_ID}`;
+  // Forme EXACTE observée dans un HAR du bouton "Se connecter" (réponse 200 -> invitationUrn).
+  const payload: Record<string, unknown> = { invitee: { inviteeUnion: { memberProfile: urn } } };
+  if (opts.message && opts.message.trim()) payload.customMessage = opts.message.trim();
+  try {
+    const res = await voyagerPost(url, { context: 'invite', kind: 'invite', label: `invite_${urn.split(':').pop()}`, body: payload });
+    return { ok: true, status: res.status, rawFile: res.rawFile };
+  } catch (e: any) {
+    if (e instanceof DailyCapReached) throw e;
+    return { ok: false, status: e?.status ?? 0, error: e?.message || String(e) };
+  }
 }

@@ -113,7 +113,7 @@ check('parsePeopleSearch degree 1 (connecté)', people[0]?.degree === 1, people[
 check('parsePeopleSearch degree 3 (non connecté)', people[1]?.degree === 3, people[1]?.degree);
 
 // Restaure le profil actif tel qu'il était avant les tests (aucun effet de bord sur l'état réel).
-if (_profileBackup !== null) writeFileSync(PROFILE_FILE, _profileBackup);
+if (_profileBackup !== null) writeFileSync(PROFILE_FILE, _profileBackup, 'utf8');
 else rmSync(PROFILE_FILE, { force: true });
 
 process.stdout.write(failed ? `\n${failed} test(s) en échec\n` : '\nTous les tests passent ✅\n');

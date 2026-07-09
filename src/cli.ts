@@ -20,6 +20,8 @@ import {
   getComments,
   resolveProfileUrl,
   resolveGeo,
+  sendInvitation,
+  getMemberRelationship,
   DateFilter,
 } from './voyager/endpoints.js';
 import {
@@ -31,7 +33,13 @@ import {
   markResolved,
   rescoreAll,
   exportLeads,
+  getInvitable,
+  getPendingInvites,
+  markInvited,
+  markAcceptedMany,
+  LeadRecord,
 } from './store.js';
+import { extractLinkedInSlug } from './voyager/linkedin-urls.js';
 import { postIsRelevant } from './score.js';
 import { getProfile, saveProfile, resetProfile, ScoreRule, Group } from './profile.js';
 import { getStatus, DailyCapReached } from './ratelimit.js';
@@ -80,6 +88,37 @@ function fail(msg: string) {
 function geoFrom(flag: string | boolean | undefined): { urn: string; label: string } | null {
   if (typeof flag !== 'string') return null;
   return resolveGeo(flag);
+}
+
+/**
+ * Résout des cibles données en argument (URL vanity, URN, ACoAA... ou slug) vers
+ * les leads stockés — pour agir sur des profils PRÉCIS. Match par slug (profileUrl)
+ * ou par profileUrn. Un URN brut hors store reste utilisable (invitation possible),
+ * mais sans nom (donc check-accepted, qui recherche par nom, le sautera).
+ */
+function resolveTargets(targets: string[]): { input: string; lead?: LeadRecord; name?: string; profileUrn?: string }[] {
+  const leads = getLeads();
+  const bySlug = new Map<string, LeadRecord>();
+  const byUrn = new Map<string, LeadRecord>();
+  for (const l of leads) {
+    if (l.profileUrl) {
+      const s = extractLinkedInSlug(l.profileUrl);
+      if (s) bySlug.set(s.toLowerCase(), l);
+    }
+    if (l.profileUrn) byUrn.set(l.profileUrn, l);
+  }
+  return targets.map((t) => {
+    const raw = t.trim();
+    const acoaa = raw.match(/ACoAA[A-Za-z0-9_-]+/)?.[0];
+    if (raw.startsWith('urn:li:') || acoaa) {
+      const urn = raw.startsWith('urn:') ? raw : `urn:li:fsd_profile:${acoaa}`;
+      const lead = byUrn.get(urn);
+      return { input: raw, lead, name: lead?.name, profileUrn: lead?.profileUrn || urn };
+    }
+    const slug = (extractLinkedInSlug(raw) || '').toLowerCase();
+    const lead = slug ? bySlug.get(slug) : undefined;
+    return { input: raw, lead, name: lead?.name, profileUrn: lead?.profileUrn };
+  });
 }
 
 async function main() {
@@ -353,6 +392,129 @@ async function main() {
       break;
     }
 
+    /* ---------- réseau : demandes de connexion ----------
+     * `invite <url|urn>...` invite EXACTEMENT ces profils (résolus via le store
+     * pour l'URN). Sans argument : puise dans le pool invitable (score décroissant). */
+    case 'invite': {
+      const targetsArg = _.slice(1);
+      const dryRun = !!flags['dry-run'];
+      type Cand = { name: string; profileUrn?: string; headline?: string; score?: number; input?: string };
+      let pool: Cand[];
+      let missing: string[] = [];
+      if (targetsArg.length) {
+        const resolved = resolveTargets(targetsArg);
+        pool = resolved.filter((r) => r.profileUrn).map((r) => ({ name: r.name || r.input, profileUrn: r.profileUrn, headline: r.lead?.headline, score: r.lead?.score, input: r.input }));
+        missing = resolved.filter((r) => !r.profileUrn).map((r) => r.input);
+      } else {
+        const minScore = num(flags['min-score'], 0);
+        const group = typeof flags.group === 'string' ? flags.group : undefined;
+        const target = num(flags.target, 0);
+        let inv = getInvitable({ minScore, group });
+        if (target > 0) inv = inv.slice(0, target);
+        pool = inv.map((l) => ({ name: l.name, profileUrn: l.profileUrn, headline: l.headline, score: l.score }));
+      }
+      if (dryRun) {
+        out({ dryRun: true, wouldInvite: pool.length, notFound: missing.length ? missing : undefined, sample: pool.slice(0, 10).map((c) => ({ name: c.name, score: c.score, headline: c.headline })), hint: 'Retire --dry-run pour envoyer. Espacement 60-120s + plafond ~20/j appliqués par l\'outil.' });
+        break;
+      }
+      if (!pool.length) {
+        out({ pool: 0, sent: 0, notFound: missing, hint: targetsArg.length ? 'Aucune cible résolue en profileUrn. Capture d\'abord le profil via `search-people`.' : 'Aucun lead invitable. Élargis avec `search-people`/`campaign` ou baisse --min-score.' });
+        break;
+      }
+      const since = new Date().toISOString();
+      let sent = 0;
+      let failed = 0;
+      let stopped = false;
+      const results: any[] = [];
+      for (const c of pool) {
+        try {
+          const r = await sendInvitation(c.profileUrn!, {}); // sans note
+          if (r.ok) {
+            markInvited(c.profileUrn!, new Date().toISOString());
+            sent++;
+            results.push({ name: c.name, status: r.status, sent: true });
+          } else {
+            failed++;
+            results.push({ name: c.name, status: r.status, error: r.error });
+          }
+        } catch (e: any) {
+          if (e instanceof DailyCapReached) { stopped = true; break; }
+          failed++;
+          results.push({ name: c.name, error: e?.message || String(e) });
+        }
+      }
+      out({ pool: pool.length, sent, failed, notFound: missing.length ? missing : undefined, stoppedByDailyCap: stopped || undefined, since, results, hint: 'Invitations parties (marquées pending). Laisse le temps aux gens d\'accepter, puis `check-accepted`. Relance demain quand le quota repart.' });
+      break;
+    }
+
+    /* ---------- réseau : détecter les acceptations ----------
+     * On recherche chaque invité en attente via searchPeople (endpoint éprouvé)
+     * et on matche par profileUrn EXACT (robuste aux homonymes). Accepté si le
+     * résultat est en 1er degré (degree===1). Aucun appel à l'endpoint profil. */
+    case 'check-accepted': {
+      const targetsArg = _.slice(1);
+      const limit = num(flags.limit, 40);
+      type Chk = { name: string; profileUrn?: string };
+      let batch: Chk[];
+      let notFound: string[] = [];
+      if (targetsArg.length) {
+        const resolved = resolveTargets(targetsArg);
+        batch = resolved.filter((r) => r.profileUrn).map((r) => ({ name: r.name || r.input, profileUrn: r.profileUrn }));
+        notFound = resolved.filter((r) => !r.profileUrn).map((r) => r.input);
+      } else {
+        const pending = getPendingInvites();
+        if (!pending.length) {
+          out({ pending: 0, newlyAccepted: 0, hint: 'Aucune invitation en attente. Envoie-en avec `invite`, ou passe les profils en argument.' });
+          break;
+        }
+        // Les plus anciennes invitations d'abord (plus susceptibles d'avoir été acceptées).
+        pending.sort((a, b) => (a.invitedAt || '').localeCompare(b.invitedAt || ''));
+        batch = pending.map((l) => ({ name: l.name, profileUrn: l.profileUrn }));
+      }
+      batch = batch.slice(0, limit);
+      const acceptedUrns: string[] = [];
+      const accepted: string[] = [];
+      const stillPending: string[] = [];
+      const noRelation: string[] = [];
+      const results: any[] = [];
+      let checked = 0;
+      let stopped = false;
+      for (const c of batch) {
+        try {
+          const rel = await getMemberRelationship(c.profileUrn!);
+          checked++;
+          if (rel.status === 'connected') {
+            acceptedUrns.push(c.profileUrn!);
+            accepted.push(c.name);
+            results.push({ name: c.name, status: 'connected' });
+          } else {
+            if (rel.status === 'pending') stillPending.push(c.name);
+            else noRelation.push(c.name);
+            results.push({ name: c.name, status: rel.status, distance: rel.distance ?? null });
+          }
+        } catch (e: any) {
+          if (e instanceof DailyCapReached) { stopped = true; break; }
+          results.push({ name: c.name, error: e?.message || String(e) });
+        }
+      }
+      const at = new Date().toISOString();
+      const n = markAcceptedMany(acceptedUrns, at);
+      out({
+        checked,
+        newlyAccepted: n,
+        accepted,
+        stillPending,
+        noPendingOrDeclined: noRelation,
+        notFound: notFound.length ? notFound : undefined,
+        stoppedByDailyCap: stopped || undefined,
+        results,
+        hint: n
+          ? 'Acceptés (connected) marqués invite=accepted + degree=1 dans data/people.jsonl. Fais `export`, puis contacte-les !'
+          : 'Aucune acceptation sur ce lot. stillPending = invitation encore en attente ; noPendingOrDeclined = ni connecté ni invitation active.',
+      });
+      break;
+    }
+
     /* ---------- (re)scoring, consultation, export ---------- */
     case 'rescore': {
       const n = rescoreAll();
@@ -393,6 +555,9 @@ async function main() {
           'comments <postUrn> [--start N --count N]',
           'campaign [--mode people|posts] [--keywords a,b] [--geo name|urn] [--target N] [--pages N] [--per-page N] [--comments] [--max-comment-posts N] [--min-score N]',
           'resolve <urn|ACoAA...>   |   resolve-pending [--min-score N --limit N]',
+          '— réseau (connexions) —',
+          'invite [<url|urn>...] [--group X] [--min-score N] [--target N] [--dry-run]  -> connexions (sans note, 60-120s, ~20/j). Args=profils précis, sinon pool.',
+          'check-accepted [<url|urn>...] [--limit N]                    -> qui a accepté (args précis, sinon invités pending) — via memberRelationship: connected/pending/none',
           '— résultats —',
           'rescore   (recalcule score/tags contre le profil)',
           'leads [--min-score N --limit N --group X --unresolved]',

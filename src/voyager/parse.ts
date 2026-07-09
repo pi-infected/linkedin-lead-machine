@@ -268,6 +268,32 @@ export function parseProfileSlug(resp: any): { publicIdentifier?: string; profil
   };
 }
 
+const DISTANCE_MAP: Record<string, number> = { DISTANCE_1: 1, DISTANCE_2: 2, DISTANCE_3: 3, OUT_OF_NETWORK: 0 };
+
+export type RelationshipStatus = 'connected' | 'pending' | 'none' | 'self' | 'unknown';
+
+/**
+ * État de relation depuis l'entité memberRelationship (dash). Formes observées :
+ *  - `*connection` présent           -> connecté (1er degré) = invitation ACCEPTÉE
+ *  - `noConnection` + invitationUnion.*invitation -> invitation encore EN ATTENTE
+ *  - `noConnection` sans invitation  -> aucune relation ni invitation active
+ *  - `self`                          -> c'est mon propre profil
+ */
+export function parseMemberRelationship(resp: any): { status: RelationshipStatus; distance?: number } {
+  const u = resp?.data?.memberRelationshipUnion ?? resp?.memberRelationshipUnion;
+  if (!u || typeof u !== 'object') return { status: 'unknown' };
+  if (u['*connection'] || u.connection) return { status: 'connected', distance: 1 };
+  if (u.self) return { status: 'self' };
+  const nc = u.noConnection;
+  if (nc) {
+    const distance = DISTANCE_MAP[nc.memberDistance as string];
+    const inv = nc.invitationUnion;
+    const pending = !!(inv && (inv['*invitation'] || inv.invitation));
+    return { status: pending ? 'pending' : 'none', distance };
+  }
+  return { status: 'unknown' };
+}
+
 /* ---------- counts ---------- */
 
 function numFrom(node: any, keys: string[]): number | undefined {

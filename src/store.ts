@@ -23,6 +23,9 @@ export interface LeadRecord extends Person {
   firstSeen: string;
   resolved?: boolean; // URL vanity confirmée
   geo?: string | null; // libellé géo confirmé (via recherche filtrée par localisation), sinon absent
+  invitationStatus?: 'pending' | 'accepted' | 'withdrawn'; // suivi de la demande de connexion
+  invitedAt?: string; // ISO : quand l'invitation est partie
+  acceptedAt?: string; // ISO : quand l'acceptation a été détectée (via check-accepted)
 }
 
 function ensure() {
@@ -41,7 +44,7 @@ function readJsonl<T>(name: string): T[] {
 }
 function writeJsonl<T>(name: string, rows: T[]) {
   ensure();
-  writeFileSync(path(name), rows.map((r) => JSON.stringify(r)).join('\n') + (rows.length ? '\n' : ''));
+  writeFileSync(path(name), rows.map((r) => JSON.stringify(r)).join('\n') + (rows.length ? '\n' : ''), 'utf8');
 }
 
 function keyOf(p: Person): string {
@@ -105,21 +108,32 @@ export function rescoreAll(): number {
   return leads.length;
 }
 
-const CSV_HEAD = ['name', 'group', 'geo', 'connected', 'score', 'tags', 'headline', 'profileUrl', 'source', 'evidence'];
-function connectedLabel(l: LeadRecord): string {
-  return l.degree === undefined ? '' : l.degree === 1 ? 'yes' : 'no';
+// Colonnes de SUIVI en tête (profil + invité ? + accepté ?) pour un suivi manuel simple.
+const CSV_HEAD = ['name', 'group', 'geo', 'profileUrl', 'Invité ?', 'Accepté ?', 'score', 'tags', 'headline', 'source', 'evidence'];
+/** "x" si une invitation a été envoyée (horodatage ou statut posé). */
+export function invitedMark(l: LeadRecord): string {
+  return l.invitedAt || l.invitationStatus === 'pending' || l.invitationStatus === 'accepted' ? 'x' : '';
+}
+/** "x" si la personne est désormais une relation (invitation acceptée ou déjà 1er degré). */
+export function acceptedMark(l: LeadRecord): string {
+  return l.invitationStatus === 'accepted' || l.degree === 1 ? 'x' : '';
+}
+/** Échappe une valeur pour une cellule CSV (guillemets doublés, retours-ligne aplatis). */
+export function csvEscape(v: unknown): string {
+  return `"${String(v ?? '').replace(/"/g, '""').replace(/[\r\n]+/g, ' ')}"`;
 }
 function csvRow(l: LeadRecord, group: Role): string {
-  const esc = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""').replace(/[\r\n]+/g, ' ')}"`;
+  const esc = csvEscape;
   return [
     l.name,
     group,
     l.geo || '',
-    connectedLabel(l),
+    l.profileUrl || '',
+    invitedMark(l),
+    acceptedMark(l),
     l.score,
     l.tags.join('|'),
     l.headline,
-    l.profileUrl,
     l.source,
     (l.evidence || []).join(' ⋮ ').slice(0, 280),
   ]
@@ -129,7 +143,7 @@ function csvRow(l: LeadRecord, group: Role): string {
 function writeCsv(name: string, leads: LeadRecord[], groupOf: (l: LeadRecord) => Role): { path: string; count: number } {
   const rows = leads.map((l) => csvRow(l, groupOf(l)));
   const p = resolve(DATA_DIR, name);
-  writeFileSync(p, [CSV_HEAD.join(','), ...rows].join('\n') + '\n');
+  writeFileSync(p, [CSV_HEAD.join(','), ...rows].join('\n') + '\n', 'utf8');
   return { path: p, count: leads.length };
 }
 
@@ -205,13 +219,72 @@ export function markResolved(key: string, profileUrl: string): boolean {
   return true;
 }
 
+/* ---------- invitations / acceptations ---------- */
+
+export interface InvitableOpts {
+  minScore?: number;
+  group?: string;
+  limit?: number;
+}
+
+/** Leads éligibles à une demande de connexion : ont un URN, pas déjà connectés (degree≠1), pas déjà invités. Tri score décroissant. */
+export function getInvitable(opts: InvitableOpts = {}): LeadRecord[] {
+  const minScore = opts.minScore ?? 0;
+  let leads = getLeads().filter(
+    (l) =>
+      !!l.profileUrn &&
+      /ACoAA[A-Za-z0-9_-]+/.test(l.profileUrn) && // URN réellement invitable (id membre valide)
+      l.name !== 'LinkedIn Member' && // profils anonymisés : pas d'invitation possible
+      l.degree !== 1 &&
+      !l.invitationStatus &&
+      l.score >= minScore,
+  );
+  if (opts.group) leads = leads.filter((l) => classify(l.headline) === opts.group);
+  leads.sort((a, b) => b.score - a.score);
+  return opts.limit ? leads.slice(0, opts.limit) : leads;
+}
+
+/** Leads dont l'invitation est partie et en attente de réponse. */
+export function getPendingInvites(): LeadRecord[] {
+  return getLeads().filter((l) => l.invitationStatus === 'pending');
+}
+
+/** Marque un lead comme invité (invitation envoyée). Clé = profileUrn ou keyOf. */
+export function markInvited(key: string, at: string): boolean {
+  const leads = readJsonl<LeadRecord>('people.jsonl');
+  const idx = leads.findIndex((l) => keyOf(l) === key || l.profileUrn === key);
+  if (idx === -1) return false;
+  leads[idx].invitationStatus = 'pending';
+  leads[idx].invitedAt = at;
+  writeJsonl('people.jsonl', leads);
+  return true;
+}
+
+/** Marque en lot les leads acceptés (par profileUrn) : status=accepted, degree=1, acceptedAt. Renvoie le nb modifié. */
+export function markAcceptedMany(profileUrns: string[], at: string): number {
+  const set = new Set(profileUrns.filter(Boolean));
+  if (!set.size) return 0;
+  const leads = readJsonl<LeadRecord>('people.jsonl');
+  let n = 0;
+  for (const l of leads) {
+    if (l.profileUrn && set.has(l.profileUrn) && l.invitationStatus !== 'accepted') {
+      l.invitationStatus = 'accepted';
+      l.acceptedAt = at;
+      l.degree = 1;
+      n++;
+    }
+  }
+  if (n) writeJsonl('people.jsonl', leads);
+  return n;
+}
+
 export function appendPost(post: PostRecord) {
   ensure();
-  appendFileSync(path('posts.jsonl'), JSON.stringify({ ...post, ts: new Date().toISOString() }) + '\n');
+  appendFileSync(path('posts.jsonl'), JSON.stringify({ ...post, ts: new Date().toISOString() }) + '\n', 'utf8');
 }
 export function appendComment(c: CommentRecord) {
   ensure();
-  appendFileSync(path('comments.jsonl'), JSON.stringify({ ...c, ts: new Date().toISOString() }) + '\n');
+  appendFileSync(path('comments.jsonl'), JSON.stringify({ ...c, ts: new Date().toISOString() }) + '\n', 'utf8');
 }
 
 export function getLeads(): LeadRecord[] {
