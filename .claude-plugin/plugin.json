@@ -1,8 +1,0 @@
-{
-  "name": "linkedin-leadgen",
-  "version": "0.2.0",
-  "description": "Agent-driven LinkedIn lead generation. You describe who you want to reach; the agent searches LinkedIn (people/posts/comments), scores and classifies leads against an ICP it builds with you, and exports CSVs. Browser transport with self-pacing rate limits to protect your account; results go to files, never dumped into context.",
-  "keywords": ["linkedin", "leadgen", "scraping", "sales", "prospecting", "icp", "csv"],
-  "author": { "name": "Paul" },
-  "license": "MIT"
-}

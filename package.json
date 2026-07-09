@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Generic LinkedIn lead-gen engine — agent-driven ICP, browser transport, self-pacing rate limits, results to files. Ships as a Claude plugin.",
+  "description": "Standalone cross-platform CLI for LinkedIn lead-gen & outreach — agent-driven ICP, browser transport, self-pacing rate limits, results to files.",
   "bin": {
     "lk": "bin/lk.mjs"
   },

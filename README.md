@@ -1,4 +1,4 @@
-# linkedin-leadgen — Claude plugin
+# linkedin-leadgen — LinkedIn lead-gen & outreach CLI
 
 <p align="center">
   <img src="assets/pixel-title.png" width="480" alt="LinkedIn Lead Machine in pixel art letters"/>
@@ -16,24 +16,18 @@ There is **nothing hardcoded to any use case**. The engine exposes neutral funct
 agent composes them from a conversation. The same plugin finds "fintech CTOs in the UK",
 "DevOps engineers commenting on Kubernetes posts", or "med-spa owners in Florida".
 
-## Install as a Claude plugin
+## Install
 
 ```
-/plugin marketplace add <path-or-git-url-to-this-repo>
-/plugin install linkedin-leadgen
-```
-Then, inside the repo once:
-```
+git clone https://github.com/pi-infected/linkedin-lead-machine
+cd linkedin-lead-machine
 npm install
-npx patchright install chrome     # or use system Chrome
+npx patchright install chrome     # or use system Chrome (auto-detected)
 ```
 
-Slash commands:
-- `/linkedin-setup` — connect a LinkedIn session (cookies or interactive login)
-- `/linkedin-find <who you want>` — the agent builds the ICP, searches, and exports
-- `/linkedin-export [min-score]` — (re)export collected leads to CSV
-
-Or just ask in natural language — the **linkedin-leadgen** skill and subagent handle it.
+Then drive the `lk` CLI directly (see **Quick start** and **Command surface** below). It is a
+standalone cross-platform CLI — nothing requires Claude Code. Optionally, an agent can run the
+whole flow via the bundled **linkedin-leadgen** skill + subagent (`skills/`, `agents/`).
 
 ## How it works
 
@@ -124,10 +118,8 @@ support**); offline commands run directly.
 ## Layout
 
 ```
-.claude-plugin/   plugin.json + marketplace.json (installable)
-commands/         slash commands
-agents/           linkedin-leadgen subagent
-skills/           linkedin-leadgen SKILL.md (the agent's playbook)
+agents/           linkedin-leadgen subagent (optional — lets an agent drive the CLI)
+skills/           linkedin-leadgen SKILL.md (optional — the agent's playbook)
 bin/lk.mjs        cross-platform launcher (Linux xvfb / macOS·Windows direct); bin/lk = POSIX shim
 src/              the engine (voyager transport, ratelimit, store, profile, score, classify, cli)
 data/             leads + raw responses (gitignored)

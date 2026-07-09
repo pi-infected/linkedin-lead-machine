@@ -134,7 +134,7 @@ second, orthogonal cut on top of the role groups — no flag needed.
 
 ## Typical end-to-end flow
 
-1. `bin/lk whoami` (or run `/linkedin-setup`).
+1. `bin/lk whoami` (if no session, `bin/lk seed-cookies <export>` or `bin/lk login`).
 2. Discuss the target with the user → propose keywords, geo, scoring, and **groups that
    segment proactively** (decision-makers vs ICs, plus a non-prospect/competitor bucket if
    the search will surface any) — without being asked. **Ask how many prospects they want**
