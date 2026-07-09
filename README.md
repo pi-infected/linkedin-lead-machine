@@ -6,10 +6,11 @@
   <img src="assets/pixel-art.png" width="480" alt="Pixel art: a magnet pulling in LinkedIn leads"/>
 </p>
 
-Agent-driven LinkedIn lead generation. You describe **who** you want to reach; the agent
-searches LinkedIn (people / posts / comments), scores and classifies the results against an
-ICP it builds with you, and exports CSVs. A real browser does the requests, the tool paces
-itself to protect your account, and results go to files — never dumped into the chat.
+Agent-driven LinkedIn lead generation **and outreach**. You describe **who** you want to
+reach; the agent searches LinkedIn (people / posts / comments), scores and classifies the
+results against an ICP it builds with you, exports CSVs, then — on your go — sends connection
+requests at a safe pace and tracks who accepts. A real browser does the requests, the tool
+paces itself to protect your account, and results go to files — never dumped into the chat.
 
 There is **nothing hardcoded to any use case**. The engine exposes neutral functions; the
 agent composes them from a conversation. The same plugin finds "fintech CTOs in the UK",
@@ -49,6 +50,11 @@ Or just ask in natural language — the **linkedin-leadgen** skill and subagent 
 - **Qualify without scraping profiles.** Scoring uses headlines + post/comment text only.
   The profile endpoint is touched sparingly, only to turn a temporary
   `urn:li:fsd_profile:ACoAA…` into a real `linkedin.com/in/slug` for retained leads.
+- **Outreach the tool paces for you.** `lk invite` sends connection requests (no note) with a
+  60-120s gap and a conservative daily cap, marking each lead `pending`. `lk check-accepted`
+  reads each invitee's relationship state by URN (`connected` / `pending` / `none`) — no
+  profile scraping, name-independent — and reports the new acceptances. The `data/leads*.csv`
+  exports carry `profileUrl` + `Invité ?` / `Accepté ?` columns to follow the funnel.
 
 ## Transport
 
@@ -89,11 +95,15 @@ npx patchright install chrome
                      --geo "United Kingdom"
 ./bin/lk campaign --mode people --pages 3
 ./bin/lk export                                   # data/leads.csv + data/leads-<group>.csv
+./bin/lk invite --target 20                       # send 20 connection requests, self-paced
+# ...a few days later...
+./bin/lk check-accepted                           # detect who accepted; updates the CSV marks
 ```
 
 ## Command surface
 
-`bin/lk` — network commands auto-run under xvfb; offline commands run directly.
+`bin/lk` / `lk` — network commands get a headful display automatically (see **Platform
+support**); offline commands run directly.
 
 | Command | What it does |
 |---|---|
@@ -128,4 +138,4 @@ state/            ratelimit.json + profile.json + browser profile (gitignored)
 
 LinkedIn rotates internal `queryId`s. If searches return 0 or a GraphQL error, the IDs in
 `src/voyager/endpoints.ts` are stale — re-sniff with `scripts/` and update them.
-Offline tests: `npx tsx src/selftest.ts`. Typecheck: `npm run typecheck`.
+Adversarial tests: `npm test`. Offline smoke: `npx tsx src/selftest.ts`. Typecheck: `npm run typecheck`.
