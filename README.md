@@ -8,9 +8,11 @@
 
 Agent-driven LinkedIn lead generation **and outreach**. You describe **who** you want to
 reach; the agent searches LinkedIn (people / posts / comments), scores and classifies the
-results against an ICP it builds with you, exports CSVs, then — on your go — sends connection
-requests at a safe pace and tracks who accepts. A real browser does the requests, the tool
-paces itself to protect your account, and results go to files — never dumped into the chat.
+results against an ICP it builds with you, exports CSVs, then — on your go — runs the whole
+outreach funnel at a safe pace: **connect → detect acceptance → first message → detect
+replies → follow up (with an image), skipping anyone who already answered.** A real browser
+does the requests, the tool paces itself to protect your account, and results go to files —
+never dumped into the chat.
 
 There is **nothing hardcoded to any use case**. The engine exposes neutral functions; the
 agent composes them from a conversation. The same plugin finds "fintech CTOs in the UK",
@@ -47,8 +49,19 @@ whole flow via the bundled **linkedin-leadgen** skill + subagent (`skills/`, `ag
 - **Outreach the tool paces for you.** `lk invite` sends connection requests (no note) with a
   60-120s gap and a conservative daily cap, marking each lead `pending`. `lk check-accepted`
   reads each invitee's relationship state by URN (`connected` / `pending` / `none`) — no
-  profile scraping, name-independent — and reports the new acceptances. The `data/leads*.csv`
-  exports carry `profileUrl` + `Invité ?` / `Accepté ?` columns to follow the funnel.
+  profile scraping, name-independent — and reports the new acceptances.
+- **A full messaging funnel, replies-aware.** `lk message` sends the first touch — a normal
+  message to 1st-degree connections, or (opt-in `--inmail`) a free InMail to the rest, with a
+  credit circuit-breaker that stops for the day once InMail is exhausted. `lk check-replies`
+  reads each conversation and marks who answered, capturing their reply text. `lk followup`
+  re-touches only the **non-responders**, enforcing a **≥3-day gap** and a max number of
+  relances, and can attach an **image**. Message spacing (45-90s) and daily caps are enforced
+  in code, not left to the caller. The `data/leads*.csv` exports carry `profileUrl` +
+  `Invité ?` / `Accepté ?` / `Message envoyé ?` / `Répondu ?` / `Follow-up ?` columns to
+  follow the whole funnel.
+- **A/B the target, not the copy.** Every collected lead can be tagged with a `--segment`
+  label (`campaign … --segment SCODE`); `invite` / `message` / `followup` filter on it, so one
+  pipeline and one set of templates can test which audience actually reacts.
 
 ## Transport
 
@@ -92,7 +105,13 @@ npx patchright install chrome
 ./bin/lk invite --target 20                       # send 20 connection requests, self-paced
 # ...a few days later...
 ./bin/lk check-accepted                           # detect who accepted; updates the CSV marks
+./bin/lk message --file msg.txt                   # first touch to new 1st-degree connections
+# ...a few days later...
+./bin/lk check-replies                            # mark who answered (excluded from follow-up)
+./bin/lk followup --file relance.txt --image benchmark.jpg   # re-touch non-responders, ≥3-day gap
 ```
+
+Placeholders `{first_name}` / `{name}` in a message/follow-up file are filled per lead.
 
 ## Command surface
 
@@ -107,10 +126,13 @@ support**); offline commands run directly.
 | `search-people "<kw>" [--geo …]` | one page of people search |
 | `search-posts "<kw>" [--date …]` | one page of post search |
 | `comments <postUrn>` | commenters of a post |
-| `campaign [--mode people\|posts] [--keywords …] [--geo …] [--pages N] [--comments]` | multi-keyword run, one browser, paced |
+| `campaign [--mode people\|posts] [--keywords …] [--geo …] [--pages N] [--comments] [--segment X]` | multi-keyword run, one browser, paced; `--segment` tags every lead it collects |
 | `resolve <urn>` / `resolve-pending` | temporary URN → vanity URL (sparing) |
-| `invite [<url\|urn>…] [--target N] [--group X] [--dry-run]` | send connection requests (no note, paced 60-120s, ~20/day cap); args = specific profiles, else the invitable pool |
+| `invite [<url\|urn>…] [--target N] [--group X] [--segment X] [--min-score N] [--dry-run]` | send connection requests (no note, paced 60-120s, ~20/day cap); args = specific profiles, else the invitable pool |
 | `check-accepted [<url\|urn>…] [--limit N]` | who accepted — reliable per-URN relationship check: `connected` / `pending` / `none`; marks accepted leads |
+| `message [<url\|urn>…] [--file <path> \| --text …] [--inmail] [--connected-text …] [--inmail-text …] [--subject …] [--segment X] [--min-score N] [--dry-run]` | first touch: normal message to 1st-degree; `--inmail` opt-in for InMail to the rest (unverified channel, credit circuit-breaker). Paced 45-90s + daily cap |
+| `check-replies [--limit N]` | detect inbound replies per conversation, capture the text, mark `Répondu ?`; responders are excluded from `followup` |
+| `followup [<url\|urn>…] [--file <path> \| --text …] [--image <path>] [--after-days N] [--max-followups N] [--segment X] [--min-score N] [--dry-run]` | re-touch non-responders only; enforced ≥3-day gap (default), max 2 relances, optional image attachment; shares the message daily cap |
 | `rescore` | recompute scores/tags after an ICP change |
 | `leads [--min-score N --group X]` | peek at top leads |
 | `export [--min-score N --no-split]` | write CSVs (combined + per group) |
