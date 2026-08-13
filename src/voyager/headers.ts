@@ -17,7 +17,8 @@ export type VoyagerContext =
   | 'post_comments'
   | 'feed'
   | 'connections'
-  | 'invite';
+  | 'invite'
+  | 'messaging';
 
 function randHex(n: number): string {
   const chars = '0123456789abcdef';
@@ -80,6 +81,12 @@ export function buildAppHeaders(context: VoyagerContext): Record<string, string>
       pageInstance = `urn:li:page:d_flagship3_profile_view_base;${pageInstanceHash()}`;
       pemMetadata = 'Voyager - Profile Actions=topcard-primary-connect-action-click,Voyager - Invitations - Actions=invite-send';
       break;
+    case 'messaging':
+      // Confirmé via HAR (send-message.har) : envoi depuis la vue profil, accept JSON, corps text/plain.
+      pageInstance = `urn:li:page:d_flagship3_profile_view_base;${pageInstanceHash()}`;
+      pemMetadata = 'Voyager - Messaging=create-message';
+      acceptHeader = 'application/json';
+      break;
     case 'profile':
     case 'people':
     default:
@@ -102,6 +109,9 @@ export function buildAppHeaders(context: VoyagerContext): Record<string, string>
   };
 
   if (context === 'profile' || context === 'invite') headers['x-li-deco-include-micro-schema'] = 'true';
+  // Le site envoie le corps createMessage en text/plain (observé HAR) ; on le force ici,
+  // sinon le transport navigateur poserait application/json par défaut.
+  if (context === 'messaging') headers['content-type'] = 'text/plain;charset=UTF-8';
 
   return headers;
 }

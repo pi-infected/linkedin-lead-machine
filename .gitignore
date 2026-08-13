@@ -18,8 +18,27 @@ data/
 # Campagnes spécifiques à l'utilisateur (runtime ; voir examples/ pour des modèles)
 campaigns/
 
+# Contenu de campagne spécifique à l'utilisateur (targeting, copie outreach, images,
+# doc de stratégie) — garder local, ne PAS publier (repo public = outil générique)
+config/groups-*.json
+config/rules-*.json
+config/outreach-*.txt
+config/*.jpeg
+config/*.jpg
+config/*.png
+segment-experiments.md
+
+# Scripts scratch / ad-hoc
+src/_*.ts
+
+# Tooling agent local (Serena)
+.serena/
+
 # Logs
 *.log
 
 # Scaffold outillage
 .tokenade/
+
+# tokenade — legacy per-project embedding model cache (now global)
+.fastembed_cache/

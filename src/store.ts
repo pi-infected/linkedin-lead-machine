@@ -21,11 +21,24 @@ export interface LeadRecord extends Person {
   tags: string[];
   evidence: string[]; // extraits (headline + bouts de texte) justifiant le lead
   firstSeen: string;
+  segment?: string; // hypothèse de segment testée (ex. "S2") — pour tracker les expériences
   resolved?: boolean; // URL vanity confirmée
   geo?: string | null; // libellé géo confirmé (via recherche filtrée par localisation), sinon absent
   invitationStatus?: 'pending' | 'accepted' | 'withdrawn'; // suivi de la demande de connexion
   invitedAt?: string; // ISO : quand l'invitation est partie
   acceptedAt?: string; // ISO : quand l'acceptation a été détectée (via check-accepted)
+  messageStatus?: 'sent' | 'failed'; // suivi du 1er message (message normal ou InMail)
+  messagedAt?: string; // ISO : quand le message est parti
+  messageChannel?: 'message' | 'inmail'; // canal utilisé : message normal (1er degré) ou InMail (non connecté)
+  lastRelCheckAt?: string; // ISO : dernière vérification de relation (check-accepted) — sert à la rotation du pool
+  followupStatus?: 'sent'; // suivi de la relance (au moins une relance envoyée)
+  followupAt?: string; // ISO : quand la DERNIÈRE relance est partie
+  followupCount?: number; // nombre de relances déjà envoyées
+  conversationId?: string; // id de thread messagerie (2-…), capturé à l'envoi — pour la détection de réponse
+  repliedStatus?: 'replied'; // le lead a répondu (message entrant détecté)
+  repliedAt?: string; // ISO : quand la réponse a été détectée
+  repliedText?: string; // texte du/des message(s) entrant(s) (pour juger l'intérêt)
+  lastReplyCheckAt?: string; // ISO : dernière vérification de réponse — rotation du check-replies
 }
 
 function ensure() {
@@ -55,7 +68,7 @@ function keyOf(p: Person): string {
 export function upsertLead(
   person: Person,
   evidence: string[],
-  opts: { geo?: string | null } = {},
+  opts: { geo?: string | null; segment?: string } = {},
 ): { isNew: boolean; record: LeadRecord } {
   const leads = readJsonl<LeadRecord>('people.jsonl');
   const k = keyOf(person);
@@ -71,6 +84,7 @@ export function upsertLead(
       evidence: dedupeStr(ev).slice(0, 8),
       firstSeen: new Date().toISOString(),
       geo: opts.geo || undefined,
+      segment: opts.segment || undefined,
     };
     leads.push(rec);
     writeJsonl('people.jsonl', leads);
@@ -89,6 +103,7 @@ export function upsertLead(
     score: sc.score,
     tags: sc.tags,
     geo: prev.geo || opts.geo || undefined,
+    segment: prev.segment || opts.segment || undefined, // 1er segment qui l'a trouvé gagne
     degree: prev.degree ?? person.degree,
   };
   leads[idx] = merged;
@@ -109,7 +124,7 @@ export function rescoreAll(): number {
 }
 
 // Colonnes de SUIVI en tête (profil + invité ? + accepté ?) pour un suivi manuel simple.
-const CSV_HEAD = ['name', 'group', 'geo', 'profileUrl', 'Invité ?', 'Accepté ?', 'score', 'tags', 'headline', 'source', 'evidence'];
+const CSV_HEAD = ['name', 'group', 'geo', 'profileUrl', 'Invité ?', 'Accepté ?', 'Message envoyé ?', 'Répondu ?', 'Follow-up ?', 'score', 'tags', 'headline', 'source', 'evidence'];
 /** "x" si une invitation a été envoyée (horodatage ou statut posé). */
 export function invitedMark(l: LeadRecord): string {
   return l.invitedAt || l.invitationStatus === 'pending' || l.invitationStatus === 'accepted' ? 'x' : '';
@@ -117,6 +132,20 @@ export function invitedMark(l: LeadRecord): string {
 /** "x" si la personne est désormais une relation (invitation acceptée ou déjà 1er degré). */
 export function acceptedMark(l: LeadRecord): string {
   return l.invitationStatus === 'accepted' || l.degree === 1 ? 'x' : '';
+}
+/** "x" si un 1er message a été envoyé (message normal ou InMail) ; "inmail"/"msg" suffixé si le canal est connu. */
+export function messagedMark(l: LeadRecord): string {
+  if (l.messageStatus !== 'sent' && !l.messagedAt) return '';
+  return l.messageChannel === 'inmail' ? 'x (inmail)' : 'x';
+}
+/** Nombre de relances envoyées (ex. "2"), sinon vide. */
+export function followupMark(l: LeadRecord): string {
+  if (l.followupCount) return String(l.followupCount);
+  return l.followupStatus === 'sent' || l.followupAt ? 'x' : '';
+}
+/** "x" si le lead a répondu (message entrant détecté via check-replies). */
+export function repliedMark(l: LeadRecord): string {
+  return l.repliedStatus === 'replied' || l.repliedAt ? 'x' : '';
 }
 /** Échappe une valeur pour une cellule CSV (guillemets doublés, retours-ligne aplatis). */
 export function csvEscape(v: unknown): string {
@@ -131,6 +160,9 @@ function csvRow(l: LeadRecord, group: Role): string {
     l.profileUrl || '',
     invitedMark(l),
     acceptedMark(l),
+    messagedMark(l),
+    repliedMark(l),
+    followupMark(l),
     l.score,
     l.tags.join('|'),
     l.headline,
@@ -224,6 +256,8 @@ export function markResolved(key: string, profileUrl: string): boolean {
 export interface InvitableOpts {
   minScore?: number;
   group?: string;
+  geo?: string; // filtre sur le libellé/URN géo confirmé (LeadRecord.geo), ex. '103644278' (US)
+  segment?: string; // filtre sur l'hypothèse de segment (LeadRecord.segment)
   limit?: number;
 }
 
@@ -239,6 +273,8 @@ export function getInvitable(opts: InvitableOpts = {}): LeadRecord[] {
       !l.invitationStatus &&
       l.score >= minScore,
   );
+  if (opts.geo) leads = leads.filter((l) => l.geo === opts.geo);
+  if (opts.segment) leads = leads.filter((l) => l.segment === opts.segment);
   if (opts.group) leads = leads.filter((l) => classify(l.headline) === opts.group);
   leads.sort((a, b) => b.score - a.score);
   return opts.limit ? leads.slice(0, opts.limit) : leads;
@@ -274,6 +310,143 @@ export function markAcceptedMany(profileUrns: string[], at: string): number {
       n++;
     }
   }
+  if (n) writeJsonl('people.jsonl', leads);
+  return n;
+}
+
+/* ---------- messages (1er contact) ---------- */
+
+/**
+ * Leads à qui envoyer un 1er message : ont un URN membre valide, pas déjà messagés.
+ * Le canal se décide au moment de l'envoi selon le degré (1er degré -> message normal,
+ * sinon -> InMail). Tri : connectés (degree=1) d'abord, puis score décroissant.
+ */
+export function getMessageable(opts: InvitableOpts = {}): LeadRecord[] {
+  const minScore = opts.minScore ?? 0;
+  let leads = getLeads().filter(
+    (l) =>
+      !!l.profileUrn &&
+      /ACoAA[A-Za-z0-9_-]+/.test(l.profileUrn) &&
+      l.name !== 'LinkedIn Member' &&
+      l.messageStatus !== 'sent' &&
+      l.score >= minScore,
+  );
+  if (opts.geo) leads = leads.filter((l) => l.geo === opts.geo);
+  if (opts.segment) leads = leads.filter((l) => l.segment === opts.segment);
+  if (opts.group) leads = leads.filter((l) => classify(l.headline) === opts.group);
+  leads.sort((a, b) => {
+    const c = Number(b.degree === 1) - Number(a.degree === 1); // connectés d'abord
+    return c !== 0 ? c : b.score - a.score;
+  });
+  return opts.limit ? leads.slice(0, opts.limit) : leads;
+}
+
+/** Leads à RELANCER : déjà messagés (messageStatus=sent), 1er degré, pas encore relancés,
+ * et messagedAt antérieur à `before` si fourni (délai de relance). Tri score décroissant. */
+export function getFollowupable(opts: InvitableOpts & { before?: string; maxFollowups?: number } = {}): LeadRecord[] {
+  const minScore = opts.minScore ?? 0;
+  const maxFollowups = opts.maxFollowups ?? 2;
+  let leads = getLeads().filter((l) => {
+    if (l.messageStatus !== 'sent' || l.degree !== 1 || l.repliedStatus === 'replied') return false;
+    if ((l.score ?? 0) < minScore) return false;
+    if ((l.followupCount ?? 0) >= maxFollowups) return false;
+    // Écart depuis le DERNIER contact (dernière relance sinon 1er message) : doit précéder `before`.
+    const lastContact = l.followupAt || l.messagedAt || '';
+    if (opts.before && !(lastContact && lastContact < opts.before)) return false;
+    return true;
+  });
+  if (opts.geo) leads = leads.filter((l) => l.geo === opts.geo);
+  if (opts.segment) leads = leads.filter((l) => l.segment === opts.segment);
+  if (opts.group) leads = leads.filter((l) => classify(l.headline) === opts.group);
+  leads.sort((a, b) => b.score - a.score);
+  return opts.limit ? leads.slice(0, opts.limit) : leads;
+}
+
+/** Marque un lead comme relancé (follow-up envoyé). Clé = profileUrn ou keyOf. */
+export function markFollowedUp(key: string, at: string): boolean {
+  const leads = readJsonl<LeadRecord>('people.jsonl');
+  const idx = leads.findIndex((l) => keyOf(l) === key || l.profileUrn === key);
+  if (idx === -1) return false;
+  leads[idx].followupStatus = 'sent';
+  leads[idx].followupAt = at;
+  leads[idx].followupCount = (leads[idx].followupCount ?? 0) + 1;
+  writeJsonl('people.jsonl', leads);
+  return true;
+}
+
+/** Marque un lead comme messagé. Clé = profileUrn ou keyOf. status='failed' laisse la trace d'un échec. */
+export function markMessaged(
+  key: string,
+  at: string,
+  channel: 'message' | 'inmail',
+  status: 'sent' | 'failed' = 'sent',
+  conversationId?: string,
+): boolean {
+  const leads = readJsonl<LeadRecord>('people.jsonl');
+  const idx = leads.findIndex((l) => keyOf(l) === key || l.profileUrn === key);
+  if (idx === -1) return false;
+  leads[idx].messageStatus = status;
+  leads[idx].messageChannel = channel;
+  if (status === 'sent') leads[idx].messagedAt = at;
+  if (conversationId) leads[idx].conversationId = conversationId;
+  writeJsonl('people.jsonl', leads);
+  return true;
+}
+
+/** Leads MESSAGÉS dont on n'a pas encore détecté de réponse, et qui ont un conversationId.
+ * Rotation par lastReplyCheckAt (moins récemment vérifié d'abord). Pour `check-replies`. */
+export function getReplyCheckable(opts: { limit?: number } = {}): LeadRecord[] {
+  const leads = getLeads().filter(
+    // à vérifier : messagés avec convId, pas encore répondu — OU répondu sans texte capturé (backfill).
+    (l) => l.messageStatus === 'sent' && !!l.conversationId && (l.repliedStatus !== 'replied' || !l.repliedText),
+  );
+  leads.sort((a, b) => (a.lastReplyCheckAt || '').localeCompare(b.lastReplyCheckAt || ''));
+  return opts.limit ? leads.slice(0, opts.limit) : leads;
+}
+
+/** Marque en lot les leads ayant répondu (par conversationId). Renvoie le nb modifié. */
+export function markRepliedMany(conversationIds: string[], at: string, texts: Record<string, string> = {}): number {
+  const set = new Set(conversationIds.filter(Boolean));
+  if (!set.size) return 0;
+  const leads = readJsonl<LeadRecord>('people.jsonl');
+  let n = 0;
+  let changed = false;
+  for (const l of leads) if (l.conversationId && set.has(l.conversationId)) {
+    if (l.repliedStatus !== 'replied') { l.repliedStatus = 'replied'; l.repliedAt = at; n++; changed = true; }
+    if (texts[l.conversationId] && !l.repliedText) { l.repliedText = texts[l.conversationId]; changed = true; }
+  }
+  if (changed) writeJsonl('people.jsonl', leads);
+  return n;
+}
+
+/** Stampe lastReplyCheckAt (par conversationId) pour la rotation du check-replies. */
+export function markReplyCheckedMany(conversationIds: string[], at: string): number {
+  const set = new Set(conversationIds.filter(Boolean));
+  if (!set.size) return 0;
+  const leads = readJsonl<LeadRecord>('people.jsonl');
+  let n = 0;
+  for (const l of leads) if (l.conversationId && set.has(l.conversationId)) { l.lastReplyCheckAt = at; n++; }
+  if (n) writeJsonl('people.jsonl', leads);
+  return n;
+}
+
+/** Backfill du conversationId sur un lead (par profileUrn). Pour rattraper les messages envoyés avant capture. */
+export function setConversationId(profileUrn: string, conversationId: string): boolean {
+  const leads = readJsonl<LeadRecord>('people.jsonl');
+  const idx = leads.findIndex((l) => l.profileUrn === profileUrn);
+  if (idx === -1 || leads[idx].conversationId) return false;
+  leads[idx].conversationId = conversationId;
+  writeJsonl('people.jsonl', leads);
+  return true;
+}
+
+/** Stampe lastRelCheckAt (par profileUrn) pour la rotation du check-accepted. Renvoie le nb modifié. */
+export function markRelCheckedMany(profileUrns: string[], at: string): number {
+  const set = new Set(profileUrns.filter(Boolean));
+  if (!set.size) return 0;
+  const leads = readJsonl<LeadRecord>('people.jsonl');
+  let n = 0;
+  for (const l of leads) if (l.profileUrn && set.has(l.profileUrn)) { l.lastRelCheckAt = at; n++; }
   if (n) writeJsonl('people.jsonl', leads);
   return n;
 }

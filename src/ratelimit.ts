@@ -17,14 +17,16 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from '
 import { resolve } from 'node:path';
 import { STATE_DIR, getSettings } from './config.js';
 
-export type CallKind = 'search' | 'comments' | 'profile' | 'invite' | 'connections';
+export type CallKind = 'search' | 'comments' | 'profile' | 'invite' | 'connections' | 'message';
 
-type DailyBucket = 'voyager' | 'profile' | 'searchPeople' | 'invite' | 'connections';
+type DailyBucket = 'voyager' | 'profile' | 'searchPeople' | 'invite' | 'connections' | 'message';
 
 interface State {
   lastCallAt: Record<string, number>; // 'global' | kind -> epoch ms
   cooldownUntil: number; // epoch ms ; appels bloqués jusque-là (signal serveur)
-  daily: { date: string; voyager: number; profile: number; searchPeople: number; invite: number; connections: number };
+  daily: { date: string; voyager: number; profile: number; searchPeople: number; invite: number; connections: number; message: number };
+  // Date (locale YYYY-MM-DD) où le serveur a signalé "plus de crédit InMail" : inutile de réessayer l'InMail ce jour-là.
+  inmailExhaustedDate?: string;
 }
 
 const STATE_PATH = resolve(STATE_DIR, 'ratelimit.json');
@@ -42,7 +44,7 @@ function emptyState(): State {
   return {
     lastCallAt: {},
     cooldownUntil: 0,
-    daily: { date: todayStr(), voyager: 0, profile: 0, searchPeople: 0, invite: 0, connections: 0 },
+    daily: { date: todayStr(), voyager: 0, profile: 0, searchPeople: 0, invite: 0, connections: 0, message: 0 },
   };
 }
 
@@ -52,7 +54,7 @@ function loadState(): State {
     const s = JSON.parse(readFileSync(STATE_PATH, 'utf8')) as State;
     // Reset quotidien
     if (s.daily?.date !== todayStr()) {
-      s.daily = { date: todayStr(), voyager: 0, profile: 0, searchPeople: 0, invite: 0, connections: 0 };
+      s.daily = { date: todayStr(), voyager: 0, profile: 0, searchPeople: 0, invite: 0, connections: 0, message: 0 };
     }
     s.lastCallAt ||= {};
     s.cooldownUntil ||= 0;
@@ -84,6 +86,7 @@ export class DailyCapReached extends Error {
 function bucketsFor(kind: CallKind): DailyBucket[] {
   if (kind === 'profile') return ['voyager', 'profile'];
   if (kind === 'invite') return ['invite']; // les invitations (POST) ont leur propre plafond, hors quota de lecture
+  if (kind === 'message') return ['message']; // les messages (POST) ont leur propre plafond, hors quota de lecture
   if (kind === 'connections') return ['voyager', 'connections'];
   return ['voyager']; // search + comments comptent dans le quota voyager global
 }
@@ -175,6 +178,17 @@ export function applyServerCooldown(ms: number): number {
   if (until > s.cooldownUntil) s.cooldownUntil = until;
   saveState(s);
   return s.cooldownUntil;
+}
+
+/** Vrai si le serveur a déjà signalé aujourd'hui qu'il n'y avait plus de crédit InMail (inutile d'insister). */
+export function isInmailExhaustedToday(): boolean {
+  return loadState().inmailExhaustedDate === todayStr();
+}
+/** Mémorise que le crédit InMail est épuisé pour aujourd'hui (persisté sur disque, reset naturel à minuit local). */
+export function markInmailExhaustedToday(): void {
+  const s = loadState();
+  s.inmailExhaustedDate = todayStr();
+  saveState(s);
 }
 
 export function getStatus(): { daily: State['daily']; cooldownRemainingMs: number; lastCallAt: Record<string, number> } {

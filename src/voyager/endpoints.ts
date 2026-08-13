@@ -3,8 +3,13 @@
  * queryIds repris tels quels de l'app existante (lea-desktop-app) — observés janv. 2026.
  */
 import { voyagerGet, voyagerPost, DailyCapReached } from './client.js';
-import { parsePostSearch, parsePeopleSearch, parseComments, parseProfileSlug, parseMemberRelationship, RelationshipStatus, Person, PostRecord, CommentRecord } from './parse.js';
+import { parsePostSearch, parsePeopleSearch, parseComments, parseProfileSlug, parseMemberRelationship, parseSelfUrn, RelationshipStatus, Person, PostRecord, CommentRecord } from './parse.js';
 import { normalizePostUrnForVoyager, extractLinkedInSlug, normalizeProfileUrnForMention } from './linkedin-urls.js';
+import { randomUUID } from 'node:crypto';
+import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { STATE_DIR } from '../config.js';
+import { uploadBinaryInPage } from './browser.js';
 
 const BASE = 'https://www.linkedin.com';
 
@@ -237,5 +242,164 @@ export async function sendInvitation(profileUrnOrId: string, opts: { message?: s
   } catch (e: any) {
     if (e instanceof DailyCapReached) throw e;
     return { ok: false, status: e?.status ?? 0, error: e?.message || String(e) };
+  }
+}
+
+/* ==================== Messagerie (1er contact) ==================== */
+/*
+ * ⚠️ UNVERIFIED : endpoint + payload dérivés du flux web "createMessage", PAS encore
+ * confirmés par un HAR d'envoi réel (contrairement à sendInvitation, verrouillé via HAR).
+ * À confirmer avec un HAR d'un message normal ET d'un InMail avant de faire confiance.
+ */
+
+export interface SendMessageResult {
+  ok: boolean;
+  status: number;
+  channel: 'message' | 'inmail';
+  conversationId?: string; // id de thread (2-…) extrait de la réponse, pour la détection de réponse ultérieure
+  noInmailCredit?: boolean; // le serveur signale : plus de crédit InMail -> inutile d'insister aujourd'hui
+  notAllowed?: boolean; // destinataire non joignable (ni relation, ni Open Profile, ni crédit)
+  rawFile?: string;
+  error?: string;
+}
+
+let _selfUrn: string | null = null;
+const SELF_PATH = resolve(STATE_DIR, 'self.json');
+/** URN fsd_profile du compte courant (mailboxUrn). Cache mémoire + disque (state/self.json)
+ * pour éviter un appel /me par process. /me sur le bucket voyager (large), pas connections. */
+export async function getSelfUrn(): Promise<string> {
+  if (_selfUrn) return _selfUrn;
+  try {
+    if (existsSync(SELF_PATH)) {
+      const u = JSON.parse(readFileSync(SELF_PATH, 'utf8'))?.urn;
+      if (typeof u === 'string' && u) return (_selfUrn = u);
+    }
+  } catch { /* cache illisible -> refetch */ }
+  const res = await voyagerGet(`${BASE}/voyager/api/me`, { context: 'profile', kind: 'search', label: 'me' });
+  const urn = parseSelfUrn(res.data);
+  if (!urn) throw new Error("Impossible de déterminer l'URN du compte courant (/me).");
+  _selfUrn = urn;
+  try { writeFileSync(SELF_PATH, JSON.stringify({ urn })); } catch { /* cache best-effort */ }
+  return urn;
+}
+
+/** Extrait l'id de thread (2-…) de la réponse createMessage (via l'URN msg_conversation). */
+function parseConversationId(resp: any): string | undefined {
+  const m = JSON.stringify(resp ?? '').match(/urn:li:msg_conversation:\(urn:li:fsd_profile:[^,]+,(2-[A-Za-z0-9+/=_-]+)\)/);
+  return m?.[1];
+}
+
+/**
+ * Détecte une RÉPONSE dans une conversation : lit les events du thread et repère
+ * un message dont l'expéditeur n'est pas soi. Endpoint CONFIRMÉ live (200) :
+ * GET /voyager/api/messaging/conversations/{convId}/events. kind='connections'.
+ */
+export async function conversationHasReply(conversationId: string): Promise<{ replied: boolean; incoming: number; text?: string; rawFile?: string }> {
+  const self = (await getSelfUrn()).match(/ACoAA[A-Za-z0-9_-]+/)?.[0] || '__none__';
+  const url = `${BASE}/voyager/api/messaging/conversations/${encodeURIComponent(conversationId)}/events?count=20`;
+  const res = await voyagerGet(url, { context: 'messaging', kind: 'connections', label: `conv_${conversationId.slice(0, 12)}` });
+  const els: any[] = res.data?.elements || res.data?.data?.elements || [];
+  let incoming = 0;
+  const texts: string[] = [];
+  for (const e of els) {
+    const id = JSON.stringify(e?.from ?? {}).match(/ACoAA[A-Za-z0-9_-]+/)?.[0];
+    if (id && id !== self) {
+      incoming++;
+      const m = [...JSON.stringify(e).matchAll(/"text":"((?:[^"\\]|\\.)*)"/g)].map((x) => x[1]);
+      const t = m.sort((a, b) => b.length - a.length)[0];
+      if (t) texts.push(t.replace(/\\n/g, ' ').replace(/\\"/g, '"'));
+    }
+  }
+  return { replied: incoming > 0, incoming, text: texts.join('  |  ').slice(0, 500) || undefined, rawFile: res.rawFile };
+}
+
+function randomTrackingId(): string {
+  // Chaîne binaire de 16 octets, telle quelle (format exact observé dans le HAR : PAS de base64).
+  let s = '';
+  for (let i = 0; i < 16; i++) s += String.fromCharCode(Math.floor(Math.random() * 256));
+  return s;
+}
+
+/**
+ * Upload une image comme pièce jointe messagerie. Flux CONFIRMÉ via HAR (image_send.har) :
+ * 1) POST voyagerVideoDashMediaUploadMetadata?action=upload -> singleUploadUrl + assetUrn ;
+ * 2) PUT des octets (image/jpeg, header media-type-family: STILLIMAGE) sur singleUploadUrl (201).
+ * L'assetUrn est ensuite référencé dans message.renderContentUnions[].file.
+ */
+export async function uploadMessagingImage(filePath: string): Promise<{ assetUrn: string; byteSize: number; mediaType: string; name: string }> {
+  const buf = readFileSync(filePath);
+  const name = filePath.split('/').pop() || 'image.jpg';
+  const mediaType = /\.png$/i.test(name) ? 'image/png' : /\.gif$/i.test(name) ? 'image/gif' : 'image/jpeg';
+  const metaRes = await voyagerPost(`${BASE}/voyager/api/voyagerVideoDashMediaUploadMetadata?action=upload`, {
+    context: 'people',
+    kind: 'search', // bucket voyager (large) : l'upload est borné par le vrai plafond du message
+    label: 'mediaMeta',
+    body: { fileSize: buf.length, filename: name, mediaUploadType: 'MESSAGING_PHOTO_ATTACHMENT' },
+  });
+  const val = metaRes.data?.data?.value ?? metaRes.data?.value;
+  const uploadUrl: string | undefined = val?.singleUploadUrl;
+  const assetUrn: string | undefined = val?.urn;
+  if (!uploadUrl || !assetUrn) throw new Error('mediaUploadMetadata: singleUploadUrl/urn manquants');
+  const put = await uploadBinaryInPage(uploadUrl, buf.toString('base64'), mediaType);
+  if (put.status !== 201 && put.status !== 200) throw new Error(`upload PUT HTTP ${put.status}`);
+  return { assetUrn, byteSize: buf.length, mediaType, name };
+}
+
+/**
+ * Envoie un 1er message. channel='message' = message normal (destinataire en 1er degré) ;
+ * channel='inmail' = InMail (non connecté). Nécessite l'URN fsd_profile du destinataire.
+ * kind='message' -> espacement 45-90s + plafond quotidien appliqués par l'outil.
+ * Relance DailyCapReached ; sinon renvoie ok:false (avec noInmailCredit/notAllowed si détecté),
+ * pour que la boucle appelante gère "plus de crédit" sans planter sur un seul profil.
+ */
+export async function sendMessage(
+  recipientUrnOrId: string,
+  text: string,
+  opts: { channel?: 'message' | 'inmail'; subject?: string; conversationId?: string; imagePath?: string } = {},
+): Promise<SendMessageResult> {
+  const channel = opts.channel ?? 'message';
+  const recipient = normalizeProfileUrnForMention(recipientUrnOrId); // -> urn:li:fsd_profile:ID
+  let mailbox: string;
+  try {
+    mailbox = await getSelfUrn();
+  } catch (e: any) {
+    if (e instanceof DailyCapReached) throw e;
+    return { ok: false, status: e?.status ?? 0, channel, error: e?.message || String(e) };
+  }
+  const url = `${BASE}/voyager/api/voyagerMessagingDashMessengerMessages?action=createMessage`;
+  // Forme confirmée via HAR : renderContentUnions + originToken ; conversationUrn pour une
+  // conversation EXISTANTE (relance), hostRecipientUrns pour un 1er contact ; mailboxUrn = expéditeur.
+  let renderContentUnions: unknown[] = [];
+  if (opts.imagePath) {
+    try {
+      const media = await uploadMessagingImage(opts.imagePath);
+      renderContentUnions = [{ file: { assetUrn: media.assetUrn, byteSize: media.byteSize, mediaType: media.mediaType, name: media.name } }];
+    } catch (e: any) {
+      if (e instanceof DailyCapReached) throw e;
+      return { ok: false, status: e?.status ?? 0, channel, error: `upload image: ${e?.message || String(e)}` };
+    }
+  }
+  const message: Record<string, unknown> = { body: { attributes: [], text }, renderContentUnions, originToken: randomUUID() };
+  if (channel === 'inmail' && opts.subject?.trim()) message.subject = opts.subject.trim();
+  if (opts.conversationId) message.conversationUrn = `urn:li:msg_conversation:(${mailbox},${opts.conversationId})`;
+  const payload: Record<string, unknown> = {
+    message,
+    mailboxUrn: mailbox,
+    trackingId: randomTrackingId(),
+    dedupeByClientGeneratedToken: false,
+  };
+  if (!opts.conversationId) payload.hostRecipientUrns = [recipient];
+  try {
+    const res = await voyagerPost(url, { context: 'messaging', kind: 'message', label: `msg_${recipient.split(':').pop()}`, body: payload });
+    return { ok: true, status: res.status, channel, conversationId: parseConversationId(res.data), rawFile: res.rawFile };
+  } catch (e: any) {
+    if (e instanceof DailyCapReached) throw e;
+    const status: number = e?.status ?? 0;
+    const body = String(e?.message || '');
+    const noInmailCredit =
+      channel === 'inmail' &&
+      (status === 422 || (/inmail/i.test(body) && /(credit|quota|limit|balance|insufficient|no longer)/i.test(body)));
+    const notAllowed = status === 403 || /not.?allowed|cannot (be )?messag|recipient.*(invalid|not)/i.test(body);
+    return { ok: false, status, channel, noInmailCredit: noInmailCredit || undefined, notAllowed: notAllowed || undefined, error: body };
   }
 }

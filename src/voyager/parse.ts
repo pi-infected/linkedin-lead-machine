@@ -294,6 +294,27 @@ export function parseMemberRelationship(resp: any): { status: RelationshipStatus
   return { status: 'unknown' };
 }
 
+/**
+ * Extrait l'URN fsd_profile du compte courant depuis /voyager/api/me.
+ * Défensif : renvoie le 1er identifiant membre (ACoAA...) rencontré dans la réponse,
+ * qui correspond au miniProfile de l'utilisateur connecté. Sert de mailboxUrn.
+ */
+export function parseSelfUrn(resp: any): string | undefined {
+  const found: string[] = [];
+  const walk = (n: any): void => {
+    if (found.length || n == null) return;
+    if (typeof n === 'string') {
+      const m = n.match(/ACoAA[A-Za-z0-9_-]+/);
+      if (m) found.push(m[0]);
+      return;
+    }
+    if (Array.isArray(n)) return void n.forEach(walk);
+    if (typeof n === 'object') for (const k of Object.keys(n)) walk(n[k]);
+  };
+  walk(resp);
+  return found.length ? `urn:li:fsd_profile:${found[0]}` : undefined;
+}
+
 /* ---------- counts ---------- */
 
 function numFrom(node: any, keys: string[]): number | undefined {

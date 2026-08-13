@@ -17,7 +17,7 @@
 // gère le stealth lui-même et ces flags le cassent.
 import { chromium, BrowserContext, Page } from 'patchright';
 import { resolve } from 'node:path';
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readlinkSync, rmSync } from 'node:fs';
 import { STATE_DIR, getCookieConfig } from '../config.js';
 import { loadCookiesFromFile, PwCookie } from '../cookies-import.js';
 
@@ -61,9 +61,30 @@ function findChrome(): string | undefined {
   return cands.find((c) => c && existsSync(c));
 }
 
+/**
+ * Retire un SingletonLock RÉSIDUEL laissé par un process navigateur mort (crash/kill
+ * de session). Le lock est un lien symbolique `<host>-<pid>` ; si le PID n'est plus
+ * vivant, on supprime Singleton{Lock,Cookie,Socket} sinon tout launch échoue avec
+ * "Chrome introuvable" (les 3 tentatives échouent → seul le chromium bundlé absent
+ * est rapporté). Sans ça, le loop unattended casse à chaque redémarrage de session.
+ */
+function clearStaleLock(): void {
+  try {
+    const target = readlinkSync(resolve(PROFILE_DIR, 'SingletonLock')); // throw si pas de lock
+    const pid = Number(target.split('-').pop());
+    if (Number.isFinite(pid) && pid > 0) {
+      try { process.kill(pid, 0); return; } catch (e: any) { if (e?.code !== 'ESRCH') return; } // vivant -> on ne touche pas
+    }
+    for (const f of ['SingletonLock', 'SingletonCookie', 'SingletonSocket']) {
+      try { rmSync(resolve(PROFILE_DIR, f), { force: true }); } catch { /* ignore */ }
+    }
+  } catch { /* pas de lock, ou best-effort */ }
+}
+
 async function launch(_opts: { headful?: boolean } = {}): Promise<BrowserContext> {
   if (_ctx) return _ctx;
   if (!existsSync(PROFILE_DIR)) mkdirSync(PROFILE_DIR, { recursive: true });
+  clearStaleLock();
   // headful sur TOUS les OS (requis par Cloudflare Turnstile) : Linux via xvfb
   // (voir bin/lk.mjs), macOS/Windows via la session bureau.
   const base = { headless: false as const, viewport: { width: 1440, height: 900 } };
@@ -147,7 +168,8 @@ export async function voyagerFetchInPage(
       const method = (o && o.method) || 'GET';
       const init: RequestInit = { method, headers, credentials: 'include' };
       if (o && o.body != null && method !== 'GET') {
-        headers['content-type'] = 'application/json; charset=UTF-8';
+        // Défaut JSON, sauf si l'appelant a déjà fixé un content-type (ex. messagerie = text/plain).
+        if (!headers['content-type'] && !headers['Content-Type']) headers['content-type'] = 'application/json; charset=UTF-8';
         init.body = o.body;
       }
       const res = await fetch(u, init);
@@ -160,6 +182,37 @@ export async function voyagerFetchInPage(
       };
     },
     [url, appHeaders, opts] as [string, Record<string, string>, InPageFetchOpts],
+  );
+}
+
+/**
+ * PUT binaire (upload d'image) DANS la page linkedin.com. Le corps est passé en
+ * base64 puis reconstruit en Uint8Array côté page. Utilisé pour l'upload média
+ * messagerie (endpoint dms-uploads, même origine → cookies inclus).
+ */
+export async function uploadBinaryInPage(
+  url: string,
+  base64: string,
+  contentType: string,
+): Promise<{ status: number; ok: boolean; body: string }> {
+  const page = await getPage();
+  await ensureOnLinkedIn(page);
+  return page.evaluate(
+    async ([u, b64, ct]: [string, string, string]) => {
+      const bin = atob(b64);
+      const arr = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+      const res = await fetch(u, {
+        method: 'PUT',
+        headers: { 'content-type': ct, 'media-type-family': 'STILLIMAGE' },
+        body: arr,
+        credentials: 'include',
+      });
+      let body = '';
+      try { body = await res.text(); } catch { /* corps vide sur 201 */ }
+      return { status: res.status, ok: res.ok, body };
+    },
+    [url, base64, contentType] as [string, string, string],
   );
 }
 

@@ -12,7 +12,7 @@
  * Les timings entre requêtes sont appliqués par l'outil (voir ratelimit.ts) :
  * relancer ces commandes en rafale n'accélère rien, l'outil attend tout seul.
  */
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
   searchPosts,
@@ -21,7 +21,9 @@ import {
   resolveProfileUrl,
   resolveGeo,
   sendInvitation,
+  sendMessage,
   getMemberRelationship,
+  conversationHasReply,
   DateFilter,
 } from './voyager/endpoints.js';
 import {
@@ -37,12 +39,20 @@ import {
   getPendingInvites,
   markInvited,
   markAcceptedMany,
+  markRelCheckedMany,
+  getMessageable,
+  markMessaged,
+  getFollowupable,
+  markFollowedUp,
+  getReplyCheckable,
+  markRepliedMany,
+  markReplyCheckedMany,
   LeadRecord,
 } from './store.js';
 import { extractLinkedInSlug } from './voyager/linkedin-urls.js';
 import { postIsRelevant } from './score.js';
 import { getProfile, saveProfile, resetProfile, ScoreRule, Group } from './profile.js';
-import { getStatus, DailyCapReached } from './ratelimit.js';
+import { getStatus, DailyCapReached, isInmailExhaustedToday, markInmailExhaustedToday } from './ratelimit.js';
 import { TokenInvalidError, NotLoggedInError } from './voyager/client.js';
 import { isLoggedIn, interactiveLogin, seedCookiesFromFile, closeBrowser } from './voyager/browser.js';
 import { ROOT } from './config.js';
@@ -243,7 +253,7 @@ async function main() {
       const page = await searchPeople(kw, { start: num(flags.start, 0), count: num(flags.count, 10), geoUrn: g?.urn });
       let newLeads = 0;
       for (const person of page.people) {
-        const r = upsertLead(person, [person.headline || ''], { geo: g?.label });
+        const r = upsertLead(person, [person.headline || ''], { geo: g?.label, segment: typeof flags.segment === 'string' ? flags.segment : undefined });
         if (r.isNew) newLeads++;
       }
       out({ query: kw, geo: g?.label || null, peopleFound: page.people.length, newLeads, nextStart: page.nextStart, rawFile: page.rawFile, hint: 'Leads dans data/people.jsonl (commande `leads`).' });
@@ -294,7 +304,7 @@ async function main() {
               calls++;
               if (!res.people.length) break;
               for (const person of res.people) {
-                const r = upsertLead(person, [person.headline || ''], { geo: g?.label });
+                const r = upsertLead(person, [person.headline || ''], { geo: g?.label, segment: typeof flags.segment === 'string' ? flags.segment : undefined });
                 if (r.isNew) newLeads++;
               }
             } else {
@@ -408,8 +418,9 @@ async function main() {
       } else {
         const minScore = num(flags['min-score'], 0);
         const group = typeof flags.group === 'string' ? flags.group : undefined;
+        const g = geoFrom(flags.geo);
         const target = num(flags.target, 0);
-        let inv = getInvitable({ minScore, group });
+        let inv = getInvitable({ minScore, group, geo: g?.urn, segment: typeof flags.segment === 'string' ? flags.segment : undefined });
         if (target > 0) inv = inv.slice(0, target);
         pool = inv.map((l) => ({ name: l.name, profileUrn: l.profileUrn, headline: l.headline, score: l.score }));
       }
@@ -435,6 +446,8 @@ async function main() {
             results.push({ name: c.name, status: r.status, sent: true });
           } else {
             failed++;
+            // Déjà invité côté serveur (invitation pending) -> marquer pending pour ne plus le re-tenter.
+            if (/CANT_RESEND_YET/.test(r.error || '')) markInvited(c.profileUrn!, new Date().toISOString());
             results.push({ name: c.name, status: r.status, error: r.error });
           }
         } catch (e: any) {
@@ -467,12 +480,18 @@ async function main() {
           out({ pending: 0, newlyAccepted: 0, hint: 'Aucune invitation en attente. Envoie-en avec `invite`, ou passe les profils en argument.' });
           break;
         }
-        // Les plus anciennes invitations d'abord (plus susceptibles d'avoir été acceptées).
-        pending.sort((a, b) => (a.invitedAt || '').localeCompare(b.invitedAt || ''));
+        // Rotation : les moins récemment vérifiés d'abord (jamais vérifié en tête), tie-break invitedAt.
+        // Évite de rester bloqué sur les plus anciens non-acceptants et couvre tout le pool au fil des tirs.
+        pending.sort(
+          (a, b) =>
+            (a.lastRelCheckAt || '').localeCompare(b.lastRelCheckAt || '') ||
+            (a.invitedAt || '').localeCompare(b.invitedAt || ''),
+        );
         batch = pending.map((l) => ({ name: l.name, profileUrn: l.profileUrn }));
       }
       batch = batch.slice(0, limit);
       const acceptedUrns: string[] = [];
+      const checkedUrns: string[] = [];
       const accepted: string[] = [];
       const stillPending: string[] = [];
       const noRelation: string[] = [];
@@ -483,6 +502,7 @@ async function main() {
         try {
           const rel = await getMemberRelationship(c.profileUrn!);
           checked++;
+          checkedUrns.push(c.profileUrn!);
           if (rel.status === 'connected') {
             acceptedUrns.push(c.profileUrn!);
             accepted.push(c.name);
@@ -499,6 +519,7 @@ async function main() {
       }
       const at = new Date().toISOString();
       const n = markAcceptedMany(acceptedUrns, at);
+      markRelCheckedMany(checkedUrns, at); // stampe la rotation (tous les vérifiés, acceptés ou non)
       out({
         checked,
         newlyAccepted: n,
@@ -512,6 +533,253 @@ async function main() {
           ? 'Acceptés (connected) marqués invite=accepted + degree=1 dans data/people.jsonl. Fais `export`, puis contacte-les !'
           : 'Aucune acceptation sur ce lot. stillPending = invitation encore en attente ; noPendingOrDeclined = ni connecté ni invitation active.',
       });
+      break;
+    }
+
+    /* ---------- réseau : détecter les RÉPONSES entrantes ----------
+     * Pour chaque lead messagé (avec conversationId), lit les events du thread et
+     * marque `replied` si un message entrant (expéditeur ≠ soi) est présent. Rotation
+     * par lastReplyCheckAt. Les répondants sont ensuite exclus de `followup`. */
+    case 'check-replies': {
+      const limit = num(flags.limit, 40);
+      const batch = getReplyCheckable({ limit });
+      if (!batch.length) {
+        out({ checked: 0, newlyReplied: 0, hint: 'Aucune conversation à vérifier (messages sans conversationId, ou déjà marqués répondu).' });
+        break;
+      }
+      const repliedIds: string[] = [];
+      const repliedTexts: Record<string, string> = {};
+      const checkedIds: string[] = [];
+      const replied: string[] = [];
+      const results: any[] = [];
+      let checked = 0;
+      let stopped = false;
+      for (const l of batch) {
+        try {
+          const r = await conversationHasReply(l.conversationId!);
+          checked++;
+          checkedIds.push(l.conversationId!);
+          if (r.replied) {
+            repliedIds.push(l.conversationId!);
+            if (r.text) repliedTexts[l.conversationId!] = r.text;
+            replied.push(l.name);
+            results.push({ name: l.name, replied: true, incoming: r.incoming, text: r.text });
+          } else {
+            results.push({ name: l.name, replied: false });
+          }
+        } catch (e: any) {
+          if (e instanceof DailyCapReached) { stopped = true; break; }
+          results.push({ name: l.name, error: e?.message || String(e) });
+        }
+      }
+      const at = new Date().toISOString();
+      const n = markRepliedMany(repliedIds, at, repliedTexts);
+      markReplyCheckedMany(checkedIds, at);
+      const prof = getProfile();
+      exportLeads({ minScore: prof.minScore || 0, split: true });
+      out({
+        checked,
+        newlyReplied: n,
+        replied,
+        stoppedByDailyCap: stopped || undefined,
+        results,
+        hint: n ? 'Répondants marqués (colonne "Répondu ?") — exclus automatiquement du `followup`.' : 'Aucune nouvelle réponse sur ce lot.',
+      });
+      break;
+    }
+
+    /* ---------- réseau : 1er message (message normal si connecté, InMail sinon) ----------
+     * Message normal aux relations (1er degré) ; InMail aux non-connectés SI un crédit InMail
+     * est dispo. Dès que le serveur signale "plus de crédit InMail", on ARRÊTE l'InMail pour la
+     * journée (persisté) mais on continue les messages normaux aux connectés. */
+    case 'message': {
+      const targetsArg = _.slice(1);
+      const dryRun = !!flags['dry-run'];
+      let baseText = typeof flags.text === 'string' ? flags.text : '';
+      if (!baseText && typeof flags.file === 'string') {
+        try { baseText = readFileSync(resolve(flags.file), 'utf8'); }
+        catch (e: any) { return fail(`--file illisible: ${e?.message || e}`); }
+      }
+      const connectedText = (typeof flags['connected-text'] === 'string' ? flags['connected-text'] : '') || baseText;
+      const inmailText = (typeof flags['inmail-text'] === 'string' ? flags['inmail-text'] : '') || baseText;
+      const subject = typeof flags.subject === 'string' ? flags.subject : undefined;
+      // InMail = canal NON vérifié : opt-in explicite via --inmail (sinon on ne contacte que les 1er degré).
+      const allowInmail = !!flags.inmail;
+
+      type Cand = { name: string; profileUrn?: string; headline?: string; score?: number; degree?: number; input?: string };
+      let pool: Cand[];
+      let missing: string[] = [];
+      if (targetsArg.length) {
+        const resolved = resolveTargets(targetsArg);
+        pool = resolved.filter((r) => r.profileUrn).map((r) => ({ name: r.name || r.input, profileUrn: r.profileUrn, headline: r.lead?.headline, score: r.lead?.score, degree: r.lead?.degree, input: r.input }));
+        missing = resolved.filter((r) => !r.profileUrn).map((r) => r.input);
+      } else {
+        const minScore = num(flags['min-score'], 0);
+        const group = typeof flags.group === 'string' ? flags.group : undefined;
+        const g = geoFrom(flags.geo);
+        const target = num(flags.target, 0);
+        let cand = getMessageable({ minScore, group, geo: g?.urn, segment: typeof flags.segment === 'string' ? flags.segment : undefined });
+        if (target > 0) cand = cand.slice(0, target);
+        pool = cand.map((l) => ({ name: l.name, profileUrn: l.profileUrn, headline: l.headline, score: l.score, degree: l.degree }));
+      }
+      const channelOf = (c: Cand): 'message' | 'inmail' => (c.degree === 1 ? 'message' : 'inmail');
+      const connected = pool.filter((c) => channelOf(c) === 'message');
+      const nonConnected = pool.filter((c) => channelOf(c) === 'inmail');
+
+      if (dryRun) {
+        out({
+          dryRun: true,
+          pool: pool.length,
+          connected: connected.length,
+          inmail: nonConnected.length,
+          inmailEnabled: allowInmail,
+          inmailExhaustedToday: isInmailExhaustedToday() || undefined,
+          hasText: { connected: !!connectedText.trim(), inmail: !!inmailText.trim() },
+          notFound: missing.length ? missing : undefined,
+          sample: pool.slice(0, 10).map((c) => ({ name: c.name, channel: channelOf(c), score: c.score, headline: c.headline })),
+          hint: 'Retire --dry-run pour envoyer. Fournis --text "..." (ou --file <path>) ; options --inmail-text / --connected-text / --subject. Sans --inmail, seuls les 1er degré sont contactés (InMail = canal non vérifié, opt-in). Espacement 45-90s + plafond quotidien par l\'outil. Placeholders {first_name} {name}.',
+        });
+        break;
+      }
+
+      if (!connectedText.trim() && !inmailText.trim()) {
+        return fail('Aucun texte de message. Donne --text "..." (ou --file <path>), et/ou --inmail-text / --connected-text.');
+      }
+      if (!pool.length) {
+        out({ pool: 0, sent: 0, notFound: missing, hint: targetsArg.length ? 'Aucune cible résolue en profileUrn. Capture d\'abord le profil via `search-people`.' : 'Aucun lead à messager. Élargis via `campaign`/`search-people` ou baisse --min-score.' });
+        break;
+      }
+
+      const render = (tpl: string, c: Cand) =>
+        tpl.replace(/\{first_name\}/gi, (c.name || '').split(/\s+/)[0] || '').replace(/\{name\}/gi, c.name || '');
+      const since = new Date().toISOString();
+      let sent = 0, failed = 0, skippedInmail = 0, inmailSkippedNoFlag = 0, stopped = false;
+      let inmailBlocked = isInmailExhaustedToday();
+      let inmailFailStreak = 0; // coupe-circuit : endpoint InMail non vérifié -> on n'insiste pas indéfiniment
+      const results: any[] = [];
+
+      // Connectés (message normal, canal vérifié) d'abord, puis non-connectés (InMail, opt-in).
+      for (const c of [...connected, ...nonConnected]) {
+        const channel = channelOf(c);
+        if (channel === 'inmail') {
+          if (!allowInmail) { inmailSkippedNoFlag++; continue; } // InMail désactivé par défaut
+          if (inmailBlocked) { skippedInmail++; continue; }
+        }
+        const tpl = channel === 'inmail' ? inmailText : connectedText;
+        if (!tpl.trim()) { results.push({ name: c.name, channel, skipped: 'no-text' }); continue; }
+        try {
+          const r = await sendMessage(c.profileUrn!, render(tpl, c), { channel, subject });
+          if (r.ok) {
+            markMessaged(c.profileUrn!, new Date().toISOString(), channel, 'sent', r.conversationId);
+            sent++;
+            if (channel === 'inmail') inmailFailStreak = 0;
+            results.push({ name: c.name, channel, status: r.status, sent: true });
+          } else if (r.noInmailCredit) {
+            inmailBlocked = true;
+            markInmailExhaustedToday();
+            results.push({ name: c.name, channel, error: 'plus de crédit InMail — arrêt InMail pour aujourd\'hui' });
+          } else {
+            failed++;
+            markMessaged(c.profileUrn!, new Date().toISOString(), channel, 'failed');
+            results.push({ name: c.name, channel, status: r.status, error: r.notAllowed ? 'non joignable (ni relation, ni Open Profile, ni crédit)' : r.error });
+            // Coupe-circuit InMail : 3 échecs d'affilée -> stop InMail du jour (plus de crédit ou endpoint KO).
+            if (channel === 'inmail' && ++inmailFailStreak >= 3) {
+              inmailBlocked = true;
+              markInmailExhaustedToday();
+              results.push({ channel: 'inmail', note: '3 échecs InMail d\'affilée — arrêt InMail pour aujourd\'hui (endpoint non vérifié / crédit épuisé)' });
+            }
+          }
+        } catch (e: any) {
+          if (e instanceof DailyCapReached) { stopped = true; break; }
+          failed++;
+          results.push({ name: c.name, channel, error: e?.message || String(e) });
+        }
+      }
+
+      const prof = getProfile();
+      exportLeads({ minScore: prof.minScore || 0, split: true }); // rafraîchit les CSV (colonne "Message envoyé ?")
+      out({
+        pool: pool.length,
+        sent,
+        failed,
+        inmailSkippedNoFlag: inmailSkippedNoFlag || undefined,
+        skippedInmail: skippedInmail || undefined,
+        inmailExhaustedToday: inmailBlocked || undefined,
+        stoppedByDailyCap: stopped || undefined,
+        notFound: missing.length ? missing : undefined,
+        since,
+        results,
+        hint: (inmailSkippedNoFlag ? `${inmailSkippedNoFlag} non-connectés ignorés (ajoute --inmail pour les contacter en InMail). ` : '') + 'Messages partis (voir colonne "Message envoyé ?" dans data/leads*.csv). Relance demain quand le quota/crédit InMail repart.',
+      });
+      break;
+    }
+
+    /* ---------- réseau : relance (follow-up) des acceptés déjà messagés ----------
+     * 2e message aux leads en 1er degré déjà messagés, pas encore relancés, dont le 1er
+     * message date d'au moins --after-days jours (défaut 3). Canal message normal (vérifié). */
+    case 'followup': {
+      const targetsArg = _.slice(1);
+      const dryRun = !!flags['dry-run'];
+      let text = typeof flags.text === 'string' ? flags.text : '';
+      if (!text && typeof flags.file === 'string') {
+        try { text = readFileSync(resolve(flags.file), 'utf8'); }
+        catch (e: any) { return fail(`--file illisible: ${e?.message || e}`); }
+      }
+      const afterDays = Math.max(3, num(flags['after-days'], 3)); // minimum 3 jours entre 2 relances (imposé)
+      const before = new Date(Date.now() - afterDays * 86400000).toISOString();
+      const maxFollowups = num(flags['max-followups'], 2);
+      const imagePath = typeof flags.image === 'string' ? resolve(flags.image) : undefined;
+      if (imagePath && !existsSync(imagePath)) return fail(`--image introuvable: ${imagePath}`);
+      type Cand = { name: string; profileUrn?: string; headline?: string; score?: number; conversationId?: string; input?: string };
+      let pool: Cand[];
+      let missing: string[] = [];
+      if (targetsArg.length) {
+        const resolved = resolveTargets(targetsArg);
+        pool = resolved.filter((r) => r.profileUrn).map((r) => ({ name: r.name || r.input, profileUrn: r.profileUrn, headline: r.lead?.headline, score: r.lead?.score, conversationId: r.lead?.conversationId, input: r.input }));
+        missing = resolved.filter((r) => !r.profileUrn).map((r) => r.input);
+      } else {
+        const minScore = num(flags['min-score'], 0);
+        const group = typeof flags.group === 'string' ? flags.group : undefined;
+        const g = geoFrom(flags.geo);
+        const target = num(flags.target, 0);
+        let cand = getFollowupable({ minScore, group, geo: g?.urn, before, maxFollowups, segment: typeof flags.segment === 'string' ? flags.segment : undefined });
+        if (target > 0) cand = cand.slice(0, target);
+        pool = cand.map((l) => ({ name: l.name, profileUrn: l.profileUrn, headline: l.headline, score: l.score, conversationId: l.conversationId }));
+      }
+      if (dryRun) {
+        out({ dryRun: true, pool: pool.length, afterDays, maxFollowups, hasText: !!text.trim(), hasImage: !!imagePath, withConversation: pool.filter((c) => c.conversationId).length, notFound: missing.length ? missing : undefined, sample: pool.slice(0, 10).map((c) => ({ name: c.name, score: c.score, headline: c.headline })), hint: 'Retire --dry-run pour relancer. --text/--file requis, --image <path> optionnel (PJ). Écart min 3j depuis le dernier contact ; max --max-followups relances (défaut 2). Espacement 45-90s (kind message). Placeholders {first_name}/{name}.' });
+        break;
+      }
+      if (!text.trim()) return fail('Aucun texte de relance. Donne --text "..." ou --file <path>.');
+      if (!pool.length) {
+        out({ pool: 0, sent: 0, notFound: missing, hint: targetsArg.length ? 'Aucune cible résolue en profileUrn.' : 'Personne à relancer (déjà relancés, pas encore messagés, ou délai --after-days non atteint).' });
+        break;
+      }
+      const render = (tpl: string, c: Cand) =>
+        tpl.replace(/\{first_name\}/gi, (c.name || '').split(/\s+/)[0] || '').replace(/\{name\}/gi, c.name || '');
+      const since = new Date().toISOString();
+      let sent = 0, failed = 0, stopped = false;
+      const results: any[] = [];
+      for (const c of pool) {
+        try {
+          const r = await sendMessage(c.profileUrn!, render(text, c), { channel: 'message', conversationId: c.conversationId, imagePath });
+          if (r.ok) {
+            markFollowedUp(c.profileUrn!, new Date().toISOString());
+            sent++;
+            results.push({ name: c.name, status: r.status, sent: true });
+          } else {
+            failed++;
+            results.push({ name: c.name, status: r.status, error: r.error });
+          }
+        } catch (e: any) {
+          if (e instanceof DailyCapReached) { stopped = true; break; }
+          failed++;
+          results.push({ name: c.name, error: e?.message || String(e) });
+        }
+      }
+      const prof = getProfile();
+      exportLeads({ minScore: prof.minScore || 0, split: true });
+      out({ pool: pool.length, sent, failed, stoppedByDailyCap: stopped || undefined, notFound: missing.length ? missing : undefined, since, results, hint: 'Relances parties (colonne "Follow-up ?" dans data/leads*.csv). Plafond partagé avec `message` (kind message).' });
       break;
     }
 
@@ -556,8 +824,11 @@ async function main() {
           'campaign [--mode people|posts] [--keywords a,b] [--geo name|urn] [--target N] [--pages N] [--per-page N] [--comments] [--max-comment-posts N] [--min-score N]',
           'resolve <urn|ACoAA...>   |   resolve-pending [--min-score N --limit N]',
           '— réseau (connexions) —',
-          'invite [<url|urn>...] [--group X] [--min-score N] [--target N] [--dry-run]  -> connexions (sans note, 60-120s, ~20/j). Args=profils précis, sinon pool.',
+          'invite [<url|urn>...] [--group X] [--geo name|urn] [--min-score N] [--target N] [--dry-run]  -> connexions (sans note, 60-120s, ~20/j). Args=profils précis, sinon pool.',
           'check-accepted [<url|urn>...] [--limit N]                    -> qui a accepté (args précis, sinon invités pending) — via memberRelationship: connected/pending/none',
+          'check-replies [--limit N]                                    -> détecte les réponses entrantes (lit les threads) ; marque "Répondu ?" et exclut du followup',
+          'followup [<url|urn>...] [--group X] [--geo name|urn] [--min-score N] [--target N] [--after-days N] [--max-followups N] [--text "..."|--file <p>] [--image <path>] [--dry-run]  -> relance des 1er degré déjà messagés (écart min 3j, PAS répondu, max 2 relances). --image = PJ.',
+          'message [<url|urn>...] [--group X] [--geo name|urn] [--min-score N] [--target N] [--text "..."|--file <p>] [--inmail-text ...] [--connected-text ...] [--subject ...] [--inmail] [--dry-run]  -> 1er message: normal aux 1er degré (vérifié) ; --inmail pour InMail aux non-connectés (opt-in, stop dès "plus de crédit"). Placeholders {first_name}/{name}.',
           '— résultats —',
           'rescore   (recalcule score/tags contre le profil)',
           'leads [--min-score N --limit N --group X --unresolved]',

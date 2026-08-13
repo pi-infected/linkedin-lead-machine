@@ -34,7 +34,8 @@ function resolveTsxCli() {
 
 const NET = new Set([
   'seed-cookies', 'login', 'whoami', 'search-posts', 'search-people',
-  'comments', 'campaign', 'resolve', 'resolve-pending', 'invite', 'check-accepted',
+  'comments', 'campaign', 'resolve', 'resolve-pending', 'invite', 'check-accepted', 'message',
+  'followup', 'check-replies',
 ]);
 
 const args = process.argv.slice(2);
