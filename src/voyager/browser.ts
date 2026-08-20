@@ -111,10 +111,26 @@ async function launch(_opts: { headful?: boolean } = {}): Promise<BrowserContext
 }
 
 async function getPage(opts: { headful?: boolean } = {}): Promise<Page> {
-  const ctx = await launch(opts);
-  if (_page && !_page.isClosed()) return _page;
-  _page = ctx.pages()[0] ?? (await ctx.newPage());
-  return _page;
+  // Récupère un contexte MORT : sur les longs runs (ex. resolve-members, 50
+  // fetchs profil ~40 Ko), le navigateur peut se fermer ("Target page, context
+  // or browser has been closed"). Le contexte caché reste alors non-null et tous
+  // les appels suivants échouent. On détecte l'échec, on jette le contexte et on
+  // relance une fois.
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const ctx = await launch(opts);
+    try {
+      if (_page && !_page.isClosed()) return _page;
+      _page = ctx.pages()[0] ?? (await ctx.newPage());
+      return _page;
+    } catch (e) {
+      lastErr = e;
+      try { await _ctx?.close(); } catch { /* best-effort */ }
+      _ctx = null;
+      _page = null;
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(`getPage: ${String(lastErr)}`);
 }
 
 /** Cookie li_at présent dans le contexte = session active. */

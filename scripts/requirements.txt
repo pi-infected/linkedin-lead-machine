@@ -1,0 +1,4 @@
+# Semantic scoring bridge (semantic_score.py). Optional: only `lk semantic-rescore` needs it.
+# The static embedding model is pulled from Hugging Face on first use and cached locally.
+model2vec>=0.8,<1.0
+numpy>=1.24

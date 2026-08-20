@@ -364,4 +364,27 @@ function countsForPost(node: any, included: any[]): { reactions?: number; commen
   };
 }
 
+/**
+ * Extrait l'URN fsd_profile (ACoAA...) d'une réponse profil-par-vanity
+ * (q=memberIdentity). Préfère le noeud dont le publicIdentifier correspond au
+ * vanity demandé ; à défaut, le premier fsd_profile ACoAA rencontré.
+ */
+export function parseMemberProfileUrn(resp: any, vanity?: string): { profileUrn?: string; publicIdentifier?: string } {
+  let matched: string | undefined;
+  let matchedId: string | undefined;
+  let fallback: string | undefined;
+  deepWalk(resp, (n) => {
+    if (!n || typeof n !== 'object') return;
+    const eu = typeof n.entityUrn === 'string' ? n.entityUrn : undefined;
+    const m = eu?.match(/urn:li:fsd_profile:ACoAA[A-Za-z0-9_-]+/)?.[0];
+    if (!m) return;
+    if (!fallback) fallback = m;
+    if (typeof n.publicIdentifier === 'string' && (!vanity || n.publicIdentifier.toLowerCase() === vanity.toLowerCase())) {
+      matched = m;
+      matchedId = n.publicIdentifier;
+    }
+  });
+  return { profileUrn: matched || fallback, publicIdentifier: matchedId };
+}
+
 export { extractLinkedInSlug };

@@ -19,6 +19,7 @@ import {
   searchPeople,
   getComments,
   resolveProfileUrl,
+  resolveMemberProfileUrn,
   resolveGeo,
   sendInvitation,
   sendMessage,
@@ -33,6 +34,8 @@ import {
   getLeads,
   getPosts,
   markResolved,
+  promoteLeadUrn,
+  setSemanticScores,
   rescoreAll,
   exportLeads,
   getInvitable,
@@ -50,7 +53,8 @@ import {
   LeadRecord,
 } from './store.js';
 import { extractLinkedInSlug } from './voyager/linkedin-urls.js';
-import { postIsRelevant } from './score.js';
+import { postIsRelevant, scoreLead } from './score.js';
+import { semanticSimilarities, semanticBonus, PAIN_REFS } from './semantic.js';
 import { getProfile, saveProfile, resetProfile, ScoreRule, Group } from './profile.js';
 import { getStatus, DailyCapReached, isInmailExhaustedToday, markInmailExhaustedToday } from './ratelimit.js';
 import { TokenInvalidError, NotLoggedInError } from './voyager/client.js';
@@ -261,15 +265,17 @@ async function main() {
     }
     case 'comments': {
       const postUrn = _[1];
-      if (!postUrn) return fail('Usage: comments <postUrn|activityId> [--start N] [--count N]');
+      if (!postUrn) return fail('Usage: comments <postUrn|activityId> [--start N] [--count N] [--geo name|urn] [--segment X]');
       const known = getPosts().find((p) => p.postUrn === postUrn || p.ugcPostUrn === postUrn || p.socialDetailUrn === postUrn);
       const target = known?.socialDetailUrn || known?.ugcPostUrn || postUrn;
       const page = await getComments(target, { start: num(flags.start, 0), count: num(flags.count, 10), postUrnLabel: known?.postUrn || postUrn });
+      const cg = geoFrom(flags.geo);
+      const cseg = typeof flags.segment === 'string' ? flags.segment : undefined;
       let newLeads = 0;
       let relevant = 0;
       for (const c of page.comments) {
         appendComment(c);
-        const r = upsertLead(c.author, [c.author.headline || '', c.text.slice(0, 240)]);
+        const r = upsertLead(c.author, [c.author.headline || '', c.text.slice(0, 240)], { geo: cg?.label, segment: cseg });
         if (r.isNew) newLeads++;
         if (postIsRelevant(c.text, c.author.headline)) relevant++;
       }
@@ -341,7 +347,7 @@ async function main() {
             calls++;
             for (const c of res.comments) {
               appendComment(c);
-              const r = upsertLead(c.author, [c.author.headline || '', c.text.slice(0, 240)]);
+              const r = upsertLead(c.author, [c.author.headline || '', c.text.slice(0, 240)], { geo: g?.label, segment: typeof flags.segment === 'string' ? flags.segment : undefined });
               if (r.isNew) { newLeads++; commenters++; }
             }
           } catch (e: any) {
@@ -378,6 +384,68 @@ async function main() {
       const r = await resolveProfileUrl(target);
       if (r.profileUrl) markResolved(target, r.profileUrl);
       out({ target, profileUrl: r.profileUrl, publicIdentifier: r.publicIdentifier, rawFile: r.rawFile });
+      break;
+    }
+    case 'semantic-rescore': {
+      // Crédite la DOULEUR exprimée (commentaire + headline) : score = score
+      // mots-clés + bonus de similarité sémantique au concept-douleur (potion).
+      // Offline : lit l'evidence déjà stockée, aucun appel LinkedIn.
+      const seg = typeof flags.segment === 'string' ? flags.segment : undefined;
+      const floor = flags['sim-floor'] !== undefined ? Number(flags['sim-floor']) : 0.25;
+      const gain = flags['sim-gain'] !== undefined ? Number(flags['sim-gain']) : 12;
+      const cap = flags['sim-cap'] !== undefined ? Number(flags['sim-cap']) : 6;
+      let leads = getLeads().filter((l) => !!l.profileUrn && (l.evidence?.length || l.headline));
+      if (seg) leads = leads.filter((l) => l.segment === seg);
+      if (!leads.length) { out({ scored: 0, hint: 'Aucun lead à scorer (filtre --segment ?).' }); break; }
+      const items = leads.map((l) => ({ key: l.profileUrn!, text: [l.headline || '', ...(l.evidence || [])].join(' · ').slice(0, 512) }));
+      const sem = semanticSimilarities(items, PAIN_REFS);
+      if (!sem.ok) return fail(`Score sémantique indisponible: ${sem.error}. (Python3 + \`pip install model2vec\` requis ; le modèle se télécharge à la demande.)`);
+      const byUrn: Record<string, { score: number; patternScore: number; sim: number }> = {};
+      let promoted3 = 0; const hist: Record<string, number> = {};
+      for (const l of leads) {
+        const sim = sem.sims[l.profileUrn!] ?? 0;
+        const patternScore = scoreLead([l.headline || '', ...(l.evidence || [])].filter(Boolean) as string[]).score;
+        const bonus = semanticBonus(sim, floor, gain, cap);
+        const score = patternScore + bonus;
+        byUrn[l.profileUrn!] = { score, patternScore, sim };
+        if (patternScore < 3 && score >= 3) promoted3++;
+        const b = sim < 0.25 ? '<.25' : sim < 0.4 ? '.25-.4' : sim < 0.55 ? '.4-.55' : '>=.55';
+        hist[b] = (hist[b] || 0) + 1;
+      }
+      const n = setSemanticScores(byUrn);
+      out({ scored: n, crossedToScore3: promoted3, simFloor: floor, simGain: gain, simCap: cap, simDistribution: hist, hint: 'score = mots-clés + bonus sémantique (douleur). Idempotent. Ajuste --sim-floor/--sim-gain/--sim-cap. Puis `invite --segment <X> --min-score 3`.' });
+      break;
+    }
+    case 'resolve-members': {
+      // Promeut les leads récoltés via commentaires (urn:li:member:NNNN, non
+      // invitables) vers leur URN fsd_profile (ACoAA...) via le lookup vanity.
+      const minScore = num(flags['min-score'], 0);
+      const seg = typeof flags.segment === 'string' ? flags.segment : undefined;
+      const limit = num(flags.limit, 40);
+      let cand = getLeads().filter(
+        (l) =>
+          !!l.profileUrn &&
+          /urn:li:member:\d+/.test(l.profileUrn) &&
+          !l.resolved &&
+          !!l.profileUrl &&
+          l.score >= minScore,
+      );
+      if (seg) cand = cand.filter((l) => l.segment === seg);
+      cand = cand.slice(0, limit);
+      if (!cand.length) { out({ pool: 0, promoted: 0, hint: 'Aucun lead member à promouvoir (déjà résolus, sans vanity, ou score < --min-score).' }); break; }
+      let promoted = 0, failed = 0, stopped = false;
+      const results: any[] = [];
+      for (const l of cand) {
+        try {
+          const r = await resolveMemberProfileUrn(l.profileUrl!);
+          if (r.profileUrn) { promoteLeadUrn(l.profileUrn!, r.profileUrn); promoted++; results.push({ name: l.name, profileUrn: r.profileUrn }); }
+          else { failed++; results.push({ name: l.name, error: 'pas d\'ACoAA résolu' }); }
+        } catch (e: any) {
+          if (e instanceof DailyCapReached) { stopped = true; break; }
+          failed++; results.push({ name: l.name, error: e?.message || String(e) });
+        }
+      }
+      out({ pool: cand.length, promoted, failed, stoppedByDailyCap: stopped || undefined, results: results.slice(0, 10), hint: 'Leads promus member->fsd_profile : deviennent invitables. Lance `invite --segment <X> --geo <Y>`. Cap profile 50/j.' });
       break;
     }
     case 'resolve-pending': {
@@ -727,7 +795,9 @@ async function main() {
       }
       const afterDays = Math.max(3, num(flags['after-days'], 3)); // minimum 3 jours entre 2 relances (imposé)
       const before = new Date(Date.now() - afterDays * 86400000).toISOString();
-      const maxFollowups = num(flags['max-followups'], 2);
+      // Défaut 1 : il n'y a qu'UN template de relance, donc >1 relance = renvoyer
+      // le MÊME DM = spam. Une seule relance par personne.
+      const maxFollowups = num(flags['max-followups'], 1);
       const imagePath = typeof flags.image === 'string' ? resolve(flags.image) : undefined;
       if (imagePath && !existsSync(imagePath)) return fail(`--image introuvable: ${imagePath}`);
       type Cand = { name: string; profileUrn?: string; headline?: string; score?: number; conversationId?: string; input?: string };
@@ -747,7 +817,7 @@ async function main() {
         pool = cand.map((l) => ({ name: l.name, profileUrn: l.profileUrn, headline: l.headline, score: l.score, conversationId: l.conversationId }));
       }
       if (dryRun) {
-        out({ dryRun: true, pool: pool.length, afterDays, maxFollowups, hasText: !!text.trim(), hasImage: !!imagePath, withConversation: pool.filter((c) => c.conversationId).length, notFound: missing.length ? missing : undefined, sample: pool.slice(0, 10).map((c) => ({ name: c.name, score: c.score, headline: c.headline })), hint: 'Retire --dry-run pour relancer. --text/--file requis, --image <path> optionnel (PJ). Écart min 3j depuis le dernier contact ; max --max-followups relances (défaut 2). Espacement 45-90s (kind message). Placeholders {first_name}/{name}.' });
+        out({ dryRun: true, pool: pool.length, afterDays, maxFollowups, hasText: !!text.trim(), hasImage: !!imagePath, withConversation: pool.filter((c) => c.conversationId).length, notFound: missing.length ? missing : undefined, sample: pool.slice(0, 10).map((c) => ({ name: c.name, score: c.score, headline: c.headline })), hint: 'Retire --dry-run pour relancer. --text/--file requis, --image <path> optionnel (PJ). Écart min 3j depuis le dernier contact ; max --max-followups relances (défaut 1 — un seul template, >1 renverrait le même DM). Espacement 45-90s (kind message). Placeholders {first_name}/{name}.' });
         break;
       }
       if (!text.trim()) return fail('Aucun texte de relance. Donne --text "..." ou --file <path>.');

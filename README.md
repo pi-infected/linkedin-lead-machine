@@ -132,10 +132,32 @@ support**); offline commands run directly.
 | `check-accepted [<url\|urn>…] [--limit N]` | who accepted — reliable per-URN relationship check: `connected` / `pending` / `none`; marks accepted leads |
 | `message [<url\|urn>…] [--file <path> \| --text …] [--inmail] [--connected-text …] [--inmail-text …] [--subject …] [--segment X] [--min-score N] [--dry-run]` | first touch: normal message to 1st-degree; `--inmail` opt-in for InMail to the rest (unverified channel, credit circuit-breaker). Paced 45-90s + daily cap |
 | `check-replies [--limit N]` | detect inbound replies per conversation, capture the text, mark `Répondu ?`; responders are excluded from `followup` |
-| `followup [<url\|urn>…] [--file <path> \| --text …] [--image <path>] [--after-days N] [--max-followups N] [--segment X] [--min-score N] [--dry-run]` | re-touch non-responders only; enforced ≥3-day gap (default), max 2 relances, optional image attachment; shares the message daily cap |
+| `followup [<url\|urn>…] [--file <path> \| --text …] [--image <path>] [--after-days N] [--max-followups N] [--segment X] [--min-score N] [--dry-run]` | re-touch non-responders only; enforced ≥3-day gap, **max 1 relance by default** (a single template — more would re-send the same DM), optional image attachment; shares the message daily cap |
+| `resolve-members [--segment X] [--min-score N] [--limit N]` | promote commenter leads from `urn:li:member:NNNN` to their invitable `fsd_profile` URN (via a vanity `q=memberIdentity` lookup), so people harvested from post `comments` can be invited; uses the `profile` bucket (cap 50/day) |
+| `semantic-rescore [--segment X] [--sim-floor F] [--sim-gain G] [--sim-cap C]` | blend a semantic-similarity bonus into each lead's score — credits the pain expressed in a lead's headline + evidence (e.g. a comment about token cost), not just keyword hits. Offline (no LinkedIn calls); needs the Python bridge below |
 | `rescore` | recompute scores/tags after an ICP change |
 | `leads [--min-score N --group X]` | peek at top leads |
 | `export [--min-score N --no-split]` | write CSVs (combined + per group) |
+
+## Intent-based leads (comments) + semantic scoring
+
+Beyond role/keyword search, you can target people by **intent** — those who commented on
+posts about a pain your product solves. Collect them with `comments <postUrn>` (or
+`campaign --mode posts --comments`), which now tags each commenter with your `--segment` /
+`--geo`. Two follow-ups make them usable:
+
+- `semantic-rescore` credits the pain expressed in their comment (not just their headline),
+  so a genuine sufferer outscores a generic title. Competitors — who use the *same*
+  vocabulary — are kept out of outreach by the `concurrent` classifier group (never invited,
+  messaged, or followed up).
+- `resolve-members` turns the `urn:li:member:NNNN` a comment carries into an invitable
+  `fsd_profile` URN (paced, 50/day).
+
+**Semantic scoring needs a small Python bridge** (`scripts/semantic_score.py`): Python 3 +
+`pip install -r scripts/requirements.txt` (model2vec + numpy). The static embedding model is
+pulled from Hugging Face on first use and cached locally. Everything runs on your machine; no
+text leaves it except the one-time model download. If Python or the package is missing,
+`semantic-rescore` fails cleanly and the rest of the CLI is unaffected.
 
 ## Layout
 
@@ -144,6 +166,7 @@ agents/           linkedin-leadgen subagent (optional — lets an agent drive th
 skills/           linkedin-leadgen SKILL.md (optional — the agent's playbook)
 bin/lk.mjs        cross-platform launcher (Linux xvfb / macOS·Windows direct); bin/lk = POSIX shim
 src/              the engine (voyager transport, ratelimit, store, profile, score, classify, cli)
+scripts/          queryId sniffers + semantic_score.py (potion embedding bridge)
 data/             leads + raw responses (gitignored)
 state/            ratelimit.json + profile.json + browser profile (gitignored)
 ```

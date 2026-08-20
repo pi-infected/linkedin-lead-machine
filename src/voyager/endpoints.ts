@@ -3,7 +3,7 @@
  * queryIds repris tels quels de l'app existante (lea-desktop-app) — observés janv. 2026.
  */
 import { voyagerGet, voyagerPost, DailyCapReached } from './client.js';
-import { parsePostSearch, parsePeopleSearch, parseComments, parseProfileSlug, parseMemberRelationship, parseSelfUrn, RelationshipStatus, Person, PostRecord, CommentRecord } from './parse.js';
+import { parsePostSearch, parsePeopleSearch, parseComments, parseProfileSlug, parseMemberProfileUrn, parseMemberRelationship, parseSelfUrn, RelationshipStatus, Person, PostRecord, CommentRecord } from './parse.js';
 import { normalizePostUrnForVoyager, extractLinkedInSlug, normalizeProfileUrnForMention } from './linkedin-urls.js';
 import { randomUUID } from 'node:crypto';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
@@ -187,6 +187,23 @@ export async function resolveProfileUrl(urnOrId: string): Promise<{ profileUrl?:
   const res = await voyagerGet(url, { context: 'profile', kind: 'profile', label: `profile_${urn.split(':').pop()}` });
   const parsed = parseProfileSlug(res.data);
   return { ...parsed, rawFile: res.rawFile };
+}
+
+/**
+ * Résout un identifiant public / vanity (ou URL linkedin.com/in/slug) vers l'URN
+ * fsd_profile invitable (ACoAA...), via le lookup profil q=memberIdentity.
+ * Sert à rendre invitables les commentateurs récoltés (qui arrivent en
+ * urn:li:member:NNNN, refusé par l'API invite). Endpoint profil TRÈS surveillé :
+ * kind='profile' -> compte dans le bucket profile (cap 50/jour, espacé).
+ */
+export async function resolveMemberProfileUrn(vanityOrUrl: string): Promise<{ profileUrn?: string; publicIdentifier?: string; rawFile?: string }> {
+  const slug = extractLinkedInSlug(vanityOrUrl);
+  if (!slug || slug.startsWith('ACoAA') || slug.includes('urn:') || /^\d+$/.test(slug)) return {};
+  const url = `${BASE}/voyager/api/identity/dash/profiles?q=memberIdentity&memberIdentity=${encodeURIComponent(slug)}&decorationId=${encodeURIComponent(PROFILE_DECORATION_ID)}`;
+  const res = await voyagerGet(url, { context: 'profile', kind: 'profile', label: `member_${slug}` });
+  const parsed = parseMemberProfileUrn(res.data, slug);
+  const profileUrn = parsed.profileUrn ? (parsed.profileUrn.startsWith('urn:') ? parsed.profileUrn : `urn:li:fsd_profile:${parsed.profileUrn}`) : undefined;
+  return { profileUrn, publicIdentifier: parsed.publicIdentifier, rawFile: res.rawFile };
 }
 
 export interface MemberRelationship {

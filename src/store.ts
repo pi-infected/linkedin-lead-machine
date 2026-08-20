@@ -20,6 +20,8 @@ export interface LeadRecord extends Person {
   score: number;
   tags: string[];
   evidence: string[]; // extraits (headline + bouts de texte) justifiant le lead
+  semanticSim?: number; // similarité cosinus au concept-douleur (0..1), via potion — crédite l'intent
+  patternScore?: number; // score mots-clés seul (avant bonus sémantique), pour idempotence
   firstSeen: string;
   segment?: string; // hypothèse de segment testée (ex. "S2") — pour tracker les expériences
   resolved?: boolean; // URL vanity confirmée
@@ -241,6 +243,46 @@ function selectLeads(minScore: number): LeadRecord[] {
 }
 
 /** Marque un lead comme résolu (URL vanity confirmée). */
+/**
+ * Promeut un lead d'un URN non-invitable (urn:li:member:NNNN, issu des
+ * commentaires) vers son URN fsd_profile invitable (ACoAA...). Optionnellement
+ * fixe le degré. Marque `resolved` pour ne pas le re-traiter.
+ */
+export function promoteLeadUrn(oldKey: string, newProfileUrn: string, degree?: number): boolean {
+  const leads = readJsonl<LeadRecord>('people.jsonl');
+  const idx = leads.findIndex((l) => l.profileUrn === oldKey || keyOf(l) === oldKey);
+  if (idx === -1) return false;
+  leads[idx].profileUrn = newProfileUrn;
+  if (degree !== undefined) leads[idx].degree = degree;
+  leads[idx].resolved = true;
+  writeJsonl('people.jsonl', leads);
+  return true;
+}
+
+/**
+ * Applique les scores sémantiques : pour chaque clé (profileUrn), fixe
+ * `score = patternScore + bonus`, mémorise `semanticSim` et `patternScore`.
+ * Idempotent : le score final est toujours recalculé depuis patternScore, jamais accumulé.
+ */
+export function setSemanticScores(
+  byUrn: Record<string, { score: number; patternScore: number; sim: number }>,
+): number {
+  const leads = readJsonl<LeadRecord>('people.jsonl');
+  let n = 0;
+  for (const l of leads) {
+    const u = l.profileUrn;
+    if (u && byUrn[u]) {
+      const r = byUrn[u];
+      l.score = r.score;
+      l.patternScore = r.patternScore;
+      l.semanticSim = r.sim;
+      n++;
+    }
+  }
+  if (n) writeJsonl('people.jsonl', leads);
+  return n;
+}
+
 export function markResolved(key: string, profileUrl: string): boolean {
   const leads = readJsonl<LeadRecord>('people.jsonl');
   const idx = leads.findIndex((l) => keyOf(l) === key || l.profileUrn === key || l.name.toLowerCase() === key.toLowerCase());
@@ -276,6 +318,7 @@ export function getInvitable(opts: InvitableOpts = {}): LeadRecord[] {
   if (opts.geo) leads = leads.filter((l) => l.geo === opts.geo);
   if (opts.segment) leads = leads.filter((l) => l.segment === opts.segment);
   if (opts.group) leads = leads.filter((l) => classify(l.headline) === opts.group);
+  leads = leads.filter((l) => classify(l.headline) !== 'concurrent'); // JAMAIS contacter un concurrent (il VEND la même solution)
   leads.sort((a, b) => b.score - a.score);
   return opts.limit ? leads.slice(0, opts.limit) : leads;
 }
@@ -334,6 +377,7 @@ export function getMessageable(opts: InvitableOpts = {}): LeadRecord[] {
   if (opts.geo) leads = leads.filter((l) => l.geo === opts.geo);
   if (opts.segment) leads = leads.filter((l) => l.segment === opts.segment);
   if (opts.group) leads = leads.filter((l) => classify(l.headline) === opts.group);
+  leads = leads.filter((l) => classify(l.headline) !== 'concurrent'); // JAMAIS contacter un concurrent (il VEND la même solution)
   leads.sort((a, b) => {
     const c = Number(b.degree === 1) - Number(a.degree === 1); // connectés d'abord
     return c !== 0 ? c : b.score - a.score;
@@ -345,7 +389,7 @@ export function getMessageable(opts: InvitableOpts = {}): LeadRecord[] {
  * et messagedAt antérieur à `before` si fourni (délai de relance). Tri score décroissant. */
 export function getFollowupable(opts: InvitableOpts & { before?: string; maxFollowups?: number } = {}): LeadRecord[] {
   const minScore = opts.minScore ?? 0;
-  const maxFollowups = opts.maxFollowups ?? 2;
+  const maxFollowups = opts.maxFollowups ?? 1; // une seule relance par défaut (un seul template)
   let leads = getLeads().filter((l) => {
     if (l.messageStatus !== 'sent' || l.degree !== 1 || l.repliedStatus === 'replied') return false;
     if ((l.score ?? 0) < minScore) return false;
@@ -358,6 +402,7 @@ export function getFollowupable(opts: InvitableOpts & { before?: string; maxFoll
   if (opts.geo) leads = leads.filter((l) => l.geo === opts.geo);
   if (opts.segment) leads = leads.filter((l) => l.segment === opts.segment);
   if (opts.group) leads = leads.filter((l) => classify(l.headline) === opts.group);
+  leads = leads.filter((l) => classify(l.headline) !== 'concurrent'); // JAMAIS contacter un concurrent (il VEND la même solution)
   leads.sort((a, b) => b.score - a.score);
   return opts.limit ? leads.slice(0, opts.limit) : leads;
 }
