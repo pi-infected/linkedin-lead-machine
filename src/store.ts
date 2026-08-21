@@ -25,6 +25,7 @@ export interface LeadRecord extends Person {
   firstSeen: string;
   segment?: string; // hypothèse de segment testée (ex. "S2") — pour tracker les expériences
   resolved?: boolean; // URL vanity confirmée
+  hadPriorConversation?: boolean; // un fil de discussion existait déjà -> jamais de 1er message à froid
   geo?: string | null; // libellé géo confirmé (via recherche filtrée par localisation), sinon absent
   invitationStatus?: 'pending' | 'accepted' | 'withdrawn'; // suivi de la demande de connexion
   invitedAt?: string; // ISO : quand l'invitation est partie
@@ -283,6 +284,17 @@ export function setSemanticScores(
   return n;
 }
 
+/** Marque qu'un fil de discussion existait déjà avec ce lead : exclu de tout
+ * 1er message à froid (et des relances). Clé = profileUrn ou keyOf. */
+export function markPriorConversation(key: string): boolean {
+  const leads = readJsonl<LeadRecord>('people.jsonl');
+  const idx = leads.findIndex((l) => l.profileUrn === key || keyOf(l) === key);
+  if (idx === -1) return false;
+  leads[idx].hadPriorConversation = true;
+  writeJsonl('people.jsonl', leads);
+  return true;
+}
+
 export function markResolved(key: string, profileUrl: string): boolean {
   const leads = readJsonl<LeadRecord>('people.jsonl');
   const idx = leads.findIndex((l) => keyOf(l) === key || l.profileUrn === key || l.name.toLowerCase() === key.toLowerCase());
@@ -372,6 +384,7 @@ export function getMessageable(opts: InvitableOpts = {}): LeadRecord[] {
       /ACoAA[A-Za-z0-9_-]+/.test(l.profileUrn) &&
       l.name !== 'LinkedIn Member' &&
       l.messageStatus !== 'sent' &&
+      !l.hadPriorConversation &&
       l.score >= minScore,
   );
   if (opts.geo) leads = leads.filter((l) => l.geo === opts.geo);
@@ -391,7 +404,7 @@ export function getFollowupable(opts: InvitableOpts & { before?: string; maxFoll
   const minScore = opts.minScore ?? 0;
   const maxFollowups = opts.maxFollowups ?? 1; // une seule relance par défaut (un seul template)
   let leads = getLeads().filter((l) => {
-    if (l.messageStatus !== 'sent' || l.degree !== 1 || l.repliedStatus === 'replied') return false;
+    if (l.messageStatus !== 'sent' || l.degree !== 1 || l.repliedStatus === 'replied' || l.hadPriorConversation) return false;
     if ((l.score ?? 0) < minScore) return false;
     if ((l.followupCount ?? 0) >= maxFollowups) return false;
     // Écart depuis le DERNIER contact (dernière relance sinon 1er message) : doit précéder `before`.

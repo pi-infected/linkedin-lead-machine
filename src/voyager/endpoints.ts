@@ -330,6 +330,55 @@ export async function conversationHasReply(conversationId: string): Promise<{ re
   return { replied: incoming > 0, incoming, text: texts.join('  |  ').slice(0, 500) || undefined, rawFile: res.rawFile };
 }
 
+/**
+ * URN fsd_profile (ACoAA...) de l'AUTRE participant de chaque conversation
+ * RÉCENTE de la boîte. Sert de garde-fou : ne PAS écrire un 1er message à froid
+ * à quelqu'un avec qui un fil existe déjà (conversation organique / historique).
+ * L'inbox ne rend que les ~20 fils les plus récents (pagination non fiable), ce
+ * qui couvre les conversations ACTIVES — le cas à risque. kind='connections'.
+ */
+export async function getRecentConversationParticipants(): Promise<Set<string>> {
+  const self = await getSelfUrn();
+  const selfId = self.match(/ACoAA[A-Za-z0-9_-]+/)?.[0];
+  const url =
+    `${BASE}/voyager/api/voyagerMessagingGraphQL/graphql` +
+    `?queryId=messengerConversations.0d5e6781bbee71c3e51c8843c6519f48` +
+    `&variables=(mailboxUrn:${encodeURIComponent(self)})`;
+  const res = await voyagerGet(url, { context: 'messaging', kind: 'connections', label: 'inbox' });
+  const ids = new Set<string>();
+  const walk = (n: any): void => {
+    if (!n || typeof n !== 'object') return;
+    if (Array.isArray(n)) { n.forEach(walk); return; }
+    if (n.entityUrn && String(n.entityUrn).includes('msg_conversation') && n.conversationParticipants) {
+      for (const id of JSON.stringify(n.conversationParticipants).match(/ACoAA[A-Za-z0-9_-]+/g) || []) {
+        if (id && id !== selfId) ids.add(id);
+      }
+    }
+    Object.values(n).forEach(walk);
+  };
+  walk(res.data);
+  return ids;
+}
+
+/**
+ * Le PREMIER message (le plus ancien) du fil a-t-il été envoyé par NOUS ?
+ * Règle de relance : on ne relance QUE les fils qu'on a initiés (sinon on
+ * s'incruste dans une conversation organique). Renvoie false si indéterminable
+ * (prudence). kind='connections'.
+ */
+export async function conversationFirstFromSelf(conversationId: string): Promise<boolean> {
+  const self = (await getSelfUrn()).match(/ACoAA[A-Za-z0-9_-]+/)?.[0] || '__none__';
+  const url = `${BASE}/voyager/api/messaging/conversations/${encodeURIComponent(conversationId)}/events?count=20`;
+  const res = await voyagerGet(url, { context: 'messaging', kind: 'connections', label: `first_${conversationId.slice(0, 12)}` });
+  const els: any[] = res.data?.elements || res.data?.data?.elements || [];
+  const ordered = els
+    .map((e) => ({ t: Number(e?.createdAt ?? 0), from: JSON.stringify(e?.from ?? {}).match(/ACoAA[A-Za-z0-9_-]+/)?.[0] }))
+    .filter((e) => e.from)
+    .sort((a, b) => a.t - b.t);
+  if (!ordered.length) return false;
+  return ordered[0].from === self;
+}
+
 function randomTrackingId(): string {
   // Chaîne binaire de 16 octets, telle quelle (format exact observé dans le HAR : PAS de base64).
   let s = '';

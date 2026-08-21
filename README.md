@@ -153,6 +153,12 @@ posts about a pain your product solves. Collect them with `comments <postUrn>` (
 - `resolve-members` turns the `urn:li:member:NNNN` a comment carries into an invitable
   `fsd_profile` URN (paced, 50/day).
 
+**Conversation-history guard.** `message` never cold-messages someone you already have a
+recent thread with (they reached out first, or prior history), and `followup` only re-touches
+threads whose first message was yours — so the tool never barges into an organic conversation.
+Pass `--allow-existing` to override and send anyway. Coverage is the ~20 most-recent
+conversations (LinkedIn's inbox doesn't paginate reliably), which catches active threads.
+
 **Semantic scoring needs a small Python bridge** (`scripts/semantic_score.py`): Python 3 +
 `pip install -r scripts/requirements.txt` (model2vec + numpy). The static embedding model is
 pulled from Hugging Face on first use and cached locally. Everything runs on your machine; no

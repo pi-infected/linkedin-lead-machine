@@ -25,6 +25,8 @@ import {
   sendMessage,
   getMemberRelationship,
   conversationHasReply,
+  getRecentConversationParticipants,
+  conversationFirstFromSelf,
   DateFilter,
 } from './voyager/endpoints.js';
 import {
@@ -34,6 +36,7 @@ import {
   getLeads,
   getPosts,
   markResolved,
+  markPriorConversation,
   promoteLeadUrn,
   setSemanticScores,
   rescoreAll,
@@ -705,7 +708,7 @@ async function main() {
           hasText: { connected: !!connectedText.trim(), inmail: !!inmailText.trim() },
           notFound: missing.length ? missing : undefined,
           sample: pool.slice(0, 10).map((c) => ({ name: c.name, channel: channelOf(c), score: c.score, headline: c.headline })),
-          hint: 'Retire --dry-run pour envoyer. Fournis --text "..." (ou --file <path>) ; options --inmail-text / --connected-text / --subject. Sans --inmail, seuls les 1er degré sont contactés (InMail = canal non vérifié, opt-in). Espacement 45-90s + plafond quotidien par l\'outil. Placeholders {first_name} {name}.',
+          hint: 'Retire --dry-run pour envoyer. Fournis --text "..." (ou --file <path>) ; options --inmail-text / --connected-text / --subject. Sans --inmail, seuls les 1er degré sont contactés (InMail = canal non vérifié, opt-in). Espacement 45-90s + plafond quotidien par l\'outil. Par défaut on saute les gens avec un fil de discussion existant ; --allow-existing force l\'envoi. Placeholders {first_name} {name}.',
         });
         break;
       }
@@ -726,9 +729,29 @@ async function main() {
       let inmailFailStreak = 0; // coupe-circuit : endpoint InMail non vérifié -> on n'insiste pas indéfiniment
       const results: any[] = [];
 
+      // Garde-fou : ne JAMAIS écrire un 1er message à froid à quelqu'un avec qui
+      // un fil existe déjà (la personne est venue parler d'elle-même, ou historique).
+      // On liste une fois les participants des conversations récentes.
+      // --allow-existing désactive ce garde-fou (envoie quand même).
+      const allowExisting = !!flags['allow-existing'];
+      let priorParticipants = new Set<string>();
+      let priorLookupOk = true;
+      if (!allowExisting) {
+        try { priorParticipants = await getRecentConversationParticipants(); }
+        catch (e: any) { if (e instanceof DailyCapReached) throw e; priorLookupOk = false; }
+      }
+      let skippedPrior = 0;
+
       // Connectés (message normal, canal vérifié) d'abord, puis non-connectés (InMail, opt-in).
       for (const c of [...connected, ...nonConnected]) {
         const channel = channelOf(c);
+        const cid = c.profileUrn?.match(/ACoAA[A-Za-z0-9_-]+/)?.[0];
+        if (cid && priorParticipants.has(cid)) {
+          markPriorConversation(c.profileUrn!);
+          skippedPrior++;
+          results.push({ name: c.name, channel, skipped: 'fil-existant' });
+          continue;
+        }
         if (channel === 'inmail') {
           if (!allowInmail) { inmailSkippedNoFlag++; continue; } // InMail désactivé par défaut
           if (inmailBlocked) { skippedInmail++; continue; }
@@ -772,6 +795,9 @@ async function main() {
         failed,
         inmailSkippedNoFlag: inmailSkippedNoFlag || undefined,
         skippedInmail: skippedInmail || undefined,
+        skippedPriorConversation: skippedPrior || undefined,
+        priorConversationLookupFailed: priorLookupOk ? undefined : true,
+        bypassedHistoryGuard: allowExisting || undefined,
         inmailExhaustedToday: inmailBlocked || undefined,
         stoppedByDailyCap: stopped || undefined,
         notFound: missing.length ? missing : undefined,
@@ -828,10 +854,19 @@ async function main() {
       const render = (tpl: string, c: Cand) =>
         tpl.replace(/\{first_name\}/gi, (c.name || '').split(/\s+/)[0] || '').replace(/\{name\}/gi, c.name || '');
       const since = new Date().toISOString();
-      let sent = 0, failed = 0, stopped = false;
+      let sent = 0, failed = 0, stopped = false, skippedNotOurs = 0;
+      const allowExisting = !!flags['allow-existing']; // bypass : relancer même un fil non initié par nous
       const results: any[] = [];
       for (const c of pool) {
         try {
+          // Règle : on ne relance QUE les fils qu'on a INITIÉS (1er message = nous).
+          // Sinon on s'incruste dans une conversation organique / un historique.
+          if (!allowExisting && c.conversationId && !(await conversationFirstFromSelf(c.conversationId))) {
+            markPriorConversation(c.profileUrn!);
+            skippedNotOurs++;
+            results.push({ name: c.name, skipped: 'fil non initié par nous' });
+            continue;
+          }
           const r = await sendMessage(c.profileUrn!, render(text, c), { channel: 'message', conversationId: c.conversationId, imagePath });
           if (r.ok) {
             markFollowedUp(c.profileUrn!, new Date().toISOString());
@@ -849,7 +884,7 @@ async function main() {
       }
       const prof = getProfile();
       exportLeads({ minScore: prof.minScore || 0, split: true });
-      out({ pool: pool.length, sent, failed, stoppedByDailyCap: stopped || undefined, notFound: missing.length ? missing : undefined, since, results, hint: 'Relances parties (colonne "Follow-up ?" dans data/leads*.csv). Plafond partagé avec `message` (kind message).' });
+      out({ pool: pool.length, sent, failed, skippedNotOurs: skippedNotOurs || undefined, stoppedByDailyCap: stopped || undefined, notFound: missing.length ? missing : undefined, since, results, hint: 'Relances parties (colonne "Follow-up ?" dans data/leads*.csv). Plafond partagé avec `message` (kind message). skippedNotOurs = fils non initiés par nous, exclus.' });
       break;
     }
 
