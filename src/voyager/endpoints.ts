@@ -344,7 +344,7 @@ export async function getRecentConversationParticipants(): Promise<Set<string>> 
     `${BASE}/voyager/api/voyagerMessagingGraphQL/graphql` +
     `?queryId=messengerConversations.0d5e6781bbee71c3e51c8843c6519f48` +
     `&variables=(mailboxUrn:${encodeURIComponent(self)})`;
-  const res = await voyagerGet(url, { context: 'messaging', kind: 'connections', label: 'inbox' });
+  const res = await voyagerGet(url, { context: 'messaging', kind: 'search', label: 'inbox' });
   const ids = new Set<string>();
   const walk = (n: any): void => {
     if (!n || typeof n !== 'object') return;
@@ -369,7 +369,7 @@ export async function getRecentConversationParticipants(): Promise<Set<string>> 
 export async function conversationFirstFromSelf(conversationId: string): Promise<boolean> {
   const self = (await getSelfUrn()).match(/ACoAA[A-Za-z0-9_-]+/)?.[0] || '__none__';
   const url = `${BASE}/voyager/api/messaging/conversations/${encodeURIComponent(conversationId)}/events?count=20`;
-  const res = await voyagerGet(url, { context: 'messaging', kind: 'connections', label: `first_${conversationId.slice(0, 12)}` });
+  const res = await voyagerGet(url, { context: 'messaging', kind: 'search', label: `first_${conversationId.slice(0, 12)}` });
   const els: any[] = res.data?.elements || res.data?.data?.elements || [];
   const ordered = els
     .map((e) => ({ t: Number(e?.createdAt ?? 0), from: JSON.stringify(e?.from ?? {}).match(/ACoAA[A-Za-z0-9_-]+/)?.[0] }))

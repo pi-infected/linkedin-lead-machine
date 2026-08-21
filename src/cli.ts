@@ -738,7 +738,12 @@ async function main() {
       let priorLookupOk = true;
       if (!allowExisting) {
         try { priorParticipants = await getRecentConversationParticipants(); }
-        catch (e: any) { if (e instanceof DailyCapReached) throw e; priorLookupOk = false; }
+        catch { priorLookupOk = false; } // inclut un éventuel plafond : on ne crashe pas
+      }
+      // Sécurité : si on n'a pas pu vérifier les fils existants, on NE PAS envoyer
+      // (mieux vaut rater un envoi que d'écrire à froid à quelqu'un avec un historique).
+      if (!allowExisting && !priorLookupOk) {
+        return fail('Vérif des fils existants indisponible (inbox). Envoi suspendu par sécurité — réessaie plus tard, ou --allow-existing pour forcer.');
       }
       let skippedPrior = 0;
 
